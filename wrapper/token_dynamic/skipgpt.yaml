@@ -1,0 +1,61 @@
+cache_type: base
+
+approximator_type: null
+approximator_rank_size: 16
+
+layer:
+  estimated_sparsity: 0.5
+  pruning_type: null
+  backend: triton
+  prefill_impl: auto
+  decode_impl: auto
+
+  router:
+    router_type: bottleneck
+    router_rank_size: 16
+
+# [base, query, group, head]
+attention:
+  estimated_sparsity: 0.5
+  pruning_type: group
+  backend: triton
+  prefill_impl: auto
+  decode_impl: auto
+
+  router:
+    router_type: bottleneck
+    router_order: diff
+    router_rank_size: 16
+
+# [base, bm, bn, bk]
+ffn:
+  block_size: 128
+  estimated_sparsity: 0.5
+  pruning_type: null
+  backend: triton
+  prefill_impl: auto
+  decode_impl: auto
+
+  up:
+    block_size: 128
+    estimated_sparsity: 0.5
+    pruning_type: bn
+    backend: triton
+    prefill_impl: auto
+    decode_impl: auto
+  
+  gate:
+    block_size: 128
+    estimated_sparsity: 0.5
+    pruning_type: bn
+    backend: triton
+    prefill_impl: auto
+    decode_impl: auto
+  
+  down:
+    block_size: 128
+    estimated_sparsity: 0.5
+    pruning_type: bn
+    backend: triton
+    prefill_impl: auto
+    decode_impl: auto
