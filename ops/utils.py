@@ -117,7 +117,7 @@ def triton_rope_qk_align(
     out_q_cos, out_q_sin = torch.empty_like(q), torch.empty_like(q)
     out_k_cos, out_k_sin = torch.empty_like(k), torch.empty_like(k)
 
-    assert q.dim() == k.dim() == 3
+    assert q.dim() == k.dim()
     assert sin.dim() == cos.dim()
 
     if sin.dim() == 3: assert sin.shape[0] == 1

@@ -12,14 +12,17 @@ def parse_args():
     parser.add_argument("--model_path", type=str, default='', help="Path to the model")
     parser.add_argument("--dynamic", type=str, default="token_dynamic", help="Dynamic type")
     parser.add_argument("--style", type=str, default="skipgpt", help="Wrapper style")
+    parser.add_argument("--device", type=str, default="cuda:0", help="Device")
 
     parser.add_argument("--benchmark_metric", type=str, default="ttft", help="Benchmark metric")
     parser.add_argument("--batch_size", type=int, default=1, help="Batch size")
     parser.add_argument("--seq_len", type=int, default=2048, help="Sequence length")
+    parser.add_argument("--sparsity", type=float, default=0.5, help="Sparsity")
     parser.add_argument("--num_warmup", type=int, default=10, help="Number of warmup iterations")
     parser.add_argument("--num_repeat", type=int, default=500, help="Number of repeat iterations")
     parser.add_argument("--cuda_graph", action="store_true", help="Enable CUDA graph")
     parser.add_argument("--liger_kernel", action="store_true", help="Enable Liger Kernel")
+    parser.add_argument("--torch_profiler", action="store_true", help="Enable torch profiler")
 
     return parser.parse_args()
 
@@ -30,6 +33,7 @@ def main():
     args.model_name = 'qwen3-4b'
     args.model_path = '/root/autodl-tmp/modelscope_cache/qwen3_4b'
     args.liger_kernel = True
+    args.num_repeat = 10
 
     if args.liger_kernel:
         from liger_kernel.transformers import apply_liger_kernel_to_llama, apply_liger_kernel_to_qwen3, apply_liger_kernel_to_qwen2
@@ -52,6 +56,7 @@ def main():
             warmup=args.num_warmup,
             repeat=args.num_repeat,
             cuda_graph=args.cuda_graph,
+            sparsity=args.sparsity,
         )
     elif args.benchmark_metric == "tpot":
         profile_res = profiler.profile_tpot(
@@ -60,6 +65,7 @@ def main():
             warmup=args.num_warmup,
             repeat=args.num_repeat,
             cuda_graph=args.cuda_graph,
+            sparsity=args.sparsity,
         )
 
 if __name__ == "__main__":

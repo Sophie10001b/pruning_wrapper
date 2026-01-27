@@ -80,12 +80,14 @@ class SkipGPTMLP(nn.Module):
         self.up_proj_impl = None
         self.gate_proj_impl = None
         self.down_proj_impl = None
+
+        self._init_impl()
     
     def _init_impl(self):
         for key in self._support_pruning_components:
             prefix, suffix = key.split('.')
             if suffix == '': suffix = prefix
-            pruning_type = getattr(self, f'{suffix}_kwargs', 'pruning_type', None)
+            pruning_type = getattr(self, f'{suffix}_kwargs', {}).get('pruning_type', None)
             if pruning_type is None: continue
             impl_name = f'{suffix}_impl'
             setattr(
@@ -123,14 +125,14 @@ class SkipGPTMLP(nn.Module):
                 hidden_states,
                 w_up=self.up_proj.weight,
                 b_up=self.up_proj.bias,
-                route_mask=pruning_kwargs.get('up_proj', route_mask),
+                route_mask=pruning_kwargs.get('up_proj', None),
                 **getattr(self, f'up_proj_kwargs', {}),
             )
             gate_output = self.gate_proj_impl(
                 hidden_states,
                 w_up=self.gate_proj.weight,
                 b_up=self.gate_proj.bias,
-                route_mask=pruning_kwargs.get('gate_proj', route_mask),
+                route_mask=pruning_kwargs.get('gate_proj', None),
                 activation=self.activation,
                 **getattr(self, f'gate_proj_kwargs', {}),
             )
@@ -139,7 +141,7 @@ class SkipGPTMLP(nn.Module):
                 ffn_output,
                 w_up=self.down_proj.weight,
                 b_up=self.down_proj.bias,
-                route_mask=pruning_kwargs.get('down_proj', route_mask),
+                route_mask=pruning_kwargs.get('down_proj', None),
                 **getattr(self, f'down_proj_kwargs', {}),
             )
         
@@ -207,7 +209,6 @@ class SkipGPTAttention(nn.Module):
             prefix, suffix = key.split('.')
             if suffix == '': suffix = prefix
             pruning_type = getattr(self, f'{suffix}_kwargs', {}).get('pruning_type', None)
-            if pruning_type is None: continue
             impl_name = f'{suffix}_impl'
             setattr(
                 self,
@@ -242,20 +243,20 @@ class SkipGPTAttention(nn.Module):
             hidden_states,
             w_up=self.k_proj.weight,
             b_up=self.k_proj.bias,
-            route_mask=pruning_kwargs.get('k_proj', route_mask),
+            route_mask=pruning_kwargs.get('k_proj', None),
             **getattr(self, f'k_proj_kwargs', {}),
         )
         v = self.v_proj_impl(
             hidden_states,
             w_up=self.v_proj.weight,
             b_up=self.v_proj.bias,
-            route_mask=pruning_kwargs.get('v_proj', route_mask),
+            route_mask=pruning_kwargs.get('v_proj', None),
             **getattr(self, f'v_proj_kwargs', {}),
         )
 
         q, k, v = list(map(lambda x: rearrange(x, '... (h d) -> ... h d', d=self.head_dim), [q, k, v]))
-        if self.q_norm: q = triton_rmsnorm(q, self.q_norm.weight, self.q_norm.variance_epsilon)
-        if self.k_norm: k = triton_rmsnorm(k, self.k_norm.weight, self.k_norm.variance_epsilon)
+        if self.q_norm: q = self.q_norm(q)
+        if self.k_norm: k = self.k_norm(k)
 
         cos, sin = position_embeddings
         q, k = triton_rope_qk_align(q, k, cos, sin)
@@ -263,7 +264,7 @@ class SkipGPTAttention(nn.Module):
         if past_key_values is not None:
             # sin and cos are specific to RoPE models; cache_position needed for the static cache
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
-            key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx, cache_kwargs)
+            k, v = past_key_values.update(k, v, self.layer_idx, cache_kwargs)
         
         attn_output = self.attention_impl(
             q, k, v,
@@ -381,11 +382,12 @@ class SkipGPTDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         pruning_targets: List[str]=['layer', 'attention', 'ffn', 'up_proj', 'gate_proj', 'down_proj'],
         estimated_sparsity: Optional[float]=-1,
+        **kwargs,
     ) -> Dict[str, torch.Tensor]:
         pruning_kwargs = {}
         for name in pruning_targets:
             router_name = f'{name}_router'
-            if hasattr(self, router_name):
+            if getattr(self, router_name, None) is not None:
                 route = getattr(self, router_name)(hidden_states)[0]
                 if name == 'layer':
                     pruning_kwargs['attention'] = pruning_kwargs['ffn'] = route
@@ -394,7 +396,7 @@ class SkipGPTDecoderLayer(nn.Module):
                 
         if estimated_sparsity > 0: # generated benchmarking mask
             for key in pruning_kwargs.keys():
-                pruning_kwargs[key] = torch.rand_like(pruning_kwargs[key]) > estimated_sparsity
+                pruning_kwargs[key] = torch.rand_like(pruning_kwargs[key].float()) > estimated_sparsity
 
         return pruning_kwargs
 
@@ -412,13 +414,13 @@ class SkipGPTDecoderLayer(nn.Module):
         **kwargs,
     ):
         # 1. pre attn pruning
-        pruning_targets = ['layer', 'attn']
+        pruning_targets = ['layer', 'attention']
         if self.router_order == 'same': 
             pruning_targets += ['ffn', 'up_proj', 'gate_proj', 'down_proj']
         local_pruning_kwargs = self.generate_pruning_kwargs(hidden_states, pruning_targets)
         
         # 1.1 check if pruning_kwargs includes route mask
-        use_predefined_route = pruning_kwargs is not None and any([k in pruning_kwargs for k in local_pruning_kwargs.keys()])
+        use_predefined_route = pruning_kwargs is not None
 
         # 2. attention
         residual = hidden_states
@@ -553,10 +555,13 @@ class SkipGPTForCausalLM(PrunedModelForCausalLM):
         self.model = SkipGPTModel(config, pruning_config, block.model, **kwargs)
     
     # Generate random route mask for benchmark
-    def generate_pruning_kwargs(self, **kwargs) -> Dict[str, torch.Tensor]:
+    def generate_pruning_kwargs(self, input_ids: torch.Tensor, **kwargs) -> Dict[str, torch.Tensor]:
         pruning_kwargs = {}
+        hidden_states = self.model.embed_tokens(input_ids)
         for i in range(self.config.num_hidden_layers):
-            pruning_kwargs[f'layer_{i}'] = self.model.layers[i].generate_pruning_kwargs(**kwargs)
+            pruning_kwargs[f'layer_{i}'] = self.model.layers[i].generate_pruning_kwargs(hidden_states=hidden_states, **kwargs)
+        
+        return pruning_kwargs
     
     def post_load(
         self,

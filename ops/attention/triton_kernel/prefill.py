@@ -477,9 +477,6 @@ class QuerySparsePrefill:
             impl: str, impl of kernel
             do_not_specialize: List, omit kernel re-compile for these variables
         """
-
-        if impl not in cls.support_kernel:
-            raise ValueError(f"{impl} is not supported")
         
         q = kwargs.get('q')
         dtype = q.dtype
@@ -496,6 +493,8 @@ class QuerySparsePrefill:
         num_stages = 2
         num_warps = 4
 
+        if impl == 'auto': impl = 'sort'
+
         estimated_sparsity = kwargs.pop('estimated_sparsity', 0)
         if route_mask is None:
             estimated_sparsity = 1
@@ -508,6 +507,9 @@ class QuerySparsePrefill:
         
         BLOCK_M = kwargs.pop('BLOCK_M', BLOCK_M)
         BLOCK_N = kwargs.pop('BLOCK_N', BLOCK_N)
+
+        if impl not in cls.support_kernel:
+            raise ValueError(f"{impl} is not supported")
         
         return getattr(cls, f"_{impl}_kernel")(
             BLOCK_M=BLOCK_M,
@@ -832,9 +834,6 @@ class GroupSparsePrefill:
             impl: str, impl of kernel
             do_not_specialize: List, omit kernel re-compile for these variables
         """
-
-        if impl not in cls.support_kernel:
-            raise ValueError(f"{impl} is not supported")
         
         q = kwargs.get('q')
         k = kwargs.get('k')
@@ -853,6 +852,8 @@ class GroupSparsePrefill:
         num_stages = 2
         num_warps = 4
 
+        if impl == 'auto': impl = 'sort'
+
         estimated_sparsity = kwargs.pop('estimated_sparsity', 0)
         if route_mask is None:
             estimated_sparsity = 1
@@ -865,6 +866,9 @@ class GroupSparsePrefill:
         
         BLOCK_M = kwargs.pop('BLOCK_M', BLOCK_M)
         BLOCK_N = kwargs.pop('BLOCK_N', BLOCK_N)
+
+        if impl not in cls.support_kernel:
+            raise ValueError(f"{impl} is not supported")
         
         return getattr(cls, f"_{impl}_kernel")(
             BLOCK_M=BLOCK_M,
@@ -1186,9 +1190,6 @@ class HeadSparsePrefill:
             impl: str, impl of kernel
             do_not_specialize: List, omit kernel re-compile for these variables
         """
-
-        if impl not in cls.support_kernel:
-            raise ValueError(f"{impl} is not supported")
         
         q = kwargs.get('q')
         k = kwargs.get('k')
@@ -1207,6 +1208,8 @@ class HeadSparsePrefill:
         num_stages = 2
         num_warps = 4
 
+        if impl == 'auto': impl = 'sort'
+
         estimated_sparsity = kwargs.pop('estimated_sparsity', 0)
         if route_mask is None:
             estimated_sparsity = 1
@@ -1219,6 +1222,9 @@ class HeadSparsePrefill:
         
         BLOCK_M = kwargs.pop('BLOCK_M', BLOCK_M)
         BLOCK_N = kwargs.pop('BLOCK_N', BLOCK_N)
+
+        if impl not in cls.support_kernel:
+            raise ValueError(f"{impl} is not supported")
         
         return getattr(cls, f"_{impl}_kernel")(
             BLOCK_M=BLOCK_M,

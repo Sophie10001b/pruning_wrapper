@@ -28,10 +28,11 @@ class ModelProfiler:
         args: Namespace,
         **kwargs,
     ):
-        self.model = model
-        self.tokenizer = tokenizer
         self.device = args.device
         self.args = args
+
+        self.model = model.to(dtype=torch.bfloat16, device=self.device)
+        self.tokenizer = tokenizer
 
         self.profiler = None
         if self.args.torch_profiler:
@@ -51,6 +52,16 @@ class ModelProfiler:
     ) -> torch.Tensor:
         dummy_inputs = torch.randint(low=0, high=self.tokenizer.vocab_size, size=(batch_size, seq_len), device=self.device)
         return dummy_inputs
+    
+    def _shuffle_mask(
+        self,
+        pruning_kwargs: Dict[str, Any],
+        estimated_sparsity: float=0.0,
+    ):
+        for k, v in pruning_kwargs.items():
+            if isinstance(v, Dict): self._shuffle_mask(v, estimated_sparsity)
+            elif isinstance(v, torch.Tensor):
+                pruning_kwargs[k] = torch.rand_like(v.float()) > estimated_sparsity
     
     def _run_torch_profiler(
         self,
@@ -88,15 +99,20 @@ class ModelProfiler:
         dummy_inputs = self._get_dummy_inputs(batch_size, seq_len)
         model_inputs_kwargs = dict(
             input_ids=dummy_inputs,
+            attention_mask=torch.ones_like(dummy_inputs, dtype=torch.bool),
             use_cache=True,
             past_key_values=None,
+            estimated_sparsity=kwargs.get('sparsity', 0.0),
         )
         
         device_interface = runtime.driver.active.get_device_interface()
         device_cache = runtime.driver.active.get_empty_cache_for_benchmark()
 
         # 1. warmup
-        for _ in range(kwargs.get('warmup', 1)): self.model(**model_inputs_kwargs)
+        for _ in range(kwargs.get('warmup', 1)):
+            dummy_pruning_kwargs = self.model.generate_pruning_kwargs(**model_inputs_kwargs)
+            model_inputs_kwargs['pruning_kwargs'] = dummy_pruning_kwargs
+            self.model(**model_inputs_kwargs)
         device_interface.synchronize()
     
         # 2. run profiler
@@ -106,17 +122,15 @@ class ModelProfiler:
 
         if self.profiler is not None: self.profiler.start()
         device_interface.synchronize()
-        if self.profiler is None:
-            for i in range(n_repeat):
-                dummy_pruning_kwargs = self.model.generate_pruning_kwargs(**model_inputs_kwargs)
-                model_inputs_kwargs['pruning_kwargs'] = dummy_pruning_kwargs
+        for i in range(n_repeat):
+            self._shuffle_mask(model_inputs_kwargs['pruning_kwargs'], kwargs.get('sparsity', 0.0))
 
-                runtime.driver.active.clear_cache(device_cache)
-                start_events[i].record()
-                with record_function("**Model Prefill**"):
-                    self.model(**model_inputs_kwargs)
-                if self.profiler is not None: self.profiler.step()
-                end_events[i].record()
+            runtime.driver.active.clear_cache(device_cache)
+            start_events[i].record()
+            with record_function("**Model Prefill**"):
+                self.model(**model_inputs_kwargs)
+            if self.profiler is not None: self.profiler.step()
+            end_events[i].record()
         
         device_interface.synchronize()
         if self.profiler is not None: self.profiler.stop()
@@ -147,14 +161,18 @@ class ModelProfiler:
         dummy_kv_cache = self._get_dummy_inputs(batch_size, seq_len)
         model_inputs_kwargs = dict(
             input_ids=dummy_inputs,
+            attention_mask=torch.ones_like(dummy_inputs, dtype=torch.bool),
             use_cache=True,
             past_key_values=dummy_kv_cache,
+            estimated_sparsity=kwargs.get('sparsity', 0.0),
         )
         device_interface = runtime.driver.active.get_device_interface()
         device_cache = runtime.driver.active.get_empty_cache_for_benchmark()
 
         # 1. warmup
         for _ in range(kwargs.get('warmup', 1)):
+            dummy_pruning_kwargs = self.model.generate_pruning_kwargs(**model_inputs_kwargs)
+            model_inputs_kwargs['pruning_kwargs'] = dummy_pruning_kwargs
             self.model(**model_inputs_kwargs)
             model_inputs_kwargs['past_key_values'].fallback_cache(seq_len)
 
@@ -170,18 +188,16 @@ class ModelProfiler:
 
             if self.profiler is not None: self.profiler.start()
             device_interface.synchronize()
-            if self.profiler is None:
-                for i in range(n_repeat):
-                    dummy_pruning_kwargs = self.model.generate_pruning_kwargs(**model_inputs_kwargs)
-                    model_inputs_kwargs['pruning_kwargs'] = dummy_pruning_kwargs
+            for i in range(n_repeat):
+                self._shuffle_mask(model_inputs_kwargs['pruning_kwargs'], kwargs.get('sparsity', 0.0))
 
-                    runtime.driver.active.clear_cache(device_cache)
-                    start_events[i].record()
-                    with record_function("**Model Prefill**"):
-                        self.model(**model_inputs_kwargs)
-                    if self.profiler is not None: self.profiler.step()
-                    end_events[i].record()
-                    model_inputs_kwargs['past_key_values'].fallback_cache(seq_len)
+                runtime.driver.active.clear_cache(device_cache)
+                start_events[i].record()
+                with record_function("**Model Decode**"):
+                    self.model(**model_inputs_kwargs)
+                if self.profiler is not None: self.profiler.step()
+                end_events[i].record()
+                model_inputs_kwargs['past_key_values'].fallback_cache(seq_len)
             
             device_interface.synchronize()
             if self.profiler is not None: self.profiler.stop()
@@ -212,8 +228,7 @@ class ModelProfiler:
 
                 if self.profiler is None:
                     for i in range(n_repeat):
-                        new_dummy_pruning_kwargs = self.model.generate_pruning_kwargs(**model_inputs_kwargs)
-                        self._inplace_copy(model_inputs_kwargs['pruning_kwargs'], new_dummy_pruning_kwargs)
+                        self._shuffle_mask(model_inputs_kwargs['pruning_kwargs'], kwargs.get('sparsity', 0.0))
 
                         new_dummy_inputs = self._get_dummy_inputs(batch_size, 1)
                         self._inplace_copy(model_inputs_kwargs['input_ids'], new_dummy_inputs)

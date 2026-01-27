@@ -323,13 +323,12 @@ class QuerySparseDecode:
             impl: str, impl of kernel
             do_not_specialize: List, omit kernel re-compile for these variables
         """
-
-        if impl not in cls.support_kernel:
-            raise ValueError(f"{impl} is not supported")
         
         # get tiling
         num_sm = torch.cuda.get_device_properties("cuda").multi_processor_count
         cc = torch.cuda.get_device_capability("cuda")[0]
+
+        if impl == 'auto': impl = 'split'
 
         q = kwargs.get('q')
         k = kwargs.get('k')
@@ -352,6 +351,9 @@ class QuerySparseDecode:
         num_split = 1
         while num_split * B * HK < num_sm * 2 and int(LK / num_split) > max(BLOCK_N, 64):
             num_split += 1
+        
+        if impl not in cls.support_kernel:
+            raise ValueError(f"{impl} is not supported")
         
         split_k_size = triton.cdiv(LK, num_split)
         if num_split > 1:
@@ -698,12 +700,11 @@ class GroupSparseDecode:
             do_not_specialize: List, omit kernel re-compile for these variables
         """
 
-        if impl not in cls.support_kernel:
-            raise ValueError(f"{impl} is not supported")
-        
         # get tiling
         num_sm = torch.cuda.get_device_properties("cuda").multi_processor_count
         cc = torch.cuda.get_device_capability("cuda")[0]
+
+        if impl == 'auto': impl = 'split'
 
         q = kwargs.get('q')
         k = kwargs.get('k')
@@ -726,6 +727,9 @@ class GroupSparseDecode:
         num_split = 1
         while num_split * B * HK < num_sm * 2 and int(LK / num_split) > max(BLOCK_N, 64):
             num_split += 1
+        
+        if impl not in cls.support_kernel:
+            raise ValueError(f"{impl} is not supported")
         
         split_k_size = triton.cdiv(LK, num_split)
         if num_split > 1:
@@ -1049,13 +1053,12 @@ class HeadSparseDecode:
             impl: str, impl of kernel
             do_not_specialize: List, omit kernel re-compile for these variables
         """
-
-        if impl not in cls.support_kernel:
-            raise ValueError(f"{impl} is not supported")
         
         # get tiling
         num_sm = torch.cuda.get_device_properties("cuda").multi_processor_count
         cc = torch.cuda.get_device_capability("cuda")[0]
+
+        if impl == 'auto': impl = 'split'
 
         q = kwargs.get('q')
         k = kwargs.get('k')
@@ -1077,6 +1080,9 @@ class HeadSparseDecode:
         num_split = 1
         while num_split * B * HQ < num_sm * 2 and int(LK / num_split) >= max(BLOCK_N, 64):
             num_split += 1
+        
+        if impl not in cls.support_kernel:
+            raise ValueError(f"{impl} is not supported")
         
         split_k_size = triton.cdiv(LK, num_split)
         if num_split > 1:

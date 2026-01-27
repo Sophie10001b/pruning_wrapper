@@ -122,5 +122,5 @@ class BottleneckRouter(Router):
     ) -> torch.Tensor:
         route = hidden_states
         route = self.router(self.down_proj(route))
-        if self.num_groups > 1: route = rearrange(route, '... (ng, g) -> ... ng g', ng=self.num_groups, g=2)
+        if self.num_groups > 1: route = rearrange(route, '... (ng g) -> ... ng g', ng=self.num_groups, g=2)
         return self.prologue(route, skip_dim=1)
