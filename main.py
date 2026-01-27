@@ -19,12 +19,20 @@ def parse_args():
     parser.add_argument("--num_warmup", type=int, default=10, help="Number of warmup iterations")
     parser.add_argument("--num_repeat", type=int, default=500, help="Number of repeat iterations")
     parser.add_argument("--cuda_graph", action="store_true", help="Enable CUDA graph")
+    parser.add_argument("--liger_kernel", action="store_true", help="Enable Liger Kernel")
 
     return parser.parse_args()
 
 def main():
     args = parse_args()
     set_seed(args.seed)
+
+    if args.liger_kernel:
+        from liger_kernel.transformers import apply_liger_kernel_to_llama, apply_liger_kernel_to_qwen3, apply_liger_kernel_to_qwen2
+        liger_kernel_kwargs = {'rope': False, 'rms_norm': True, 'swiglu': False}
+        apply_liger_kernel_to_llama(**liger_kernel_kwargs)
+        apply_liger_kernel_to_qwen2(**liger_kernel_kwargs)
+        apply_liger_kernel_to_qwen3(**liger_kernel_kwargs)
 
     model, tokenizer = init_model(args)
     profiler = ModelProfiler(
