@@ -49,3 +49,6 @@ def main():
             repeat=args.num_repeat,
             cuda_graph=args.cuda_graph,
         )
+
+if __name__ == "__main__":
+    main()

@@ -6,7 +6,7 @@ from typing import Optional, Dict, List
 from argparse import Namespace
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
-from .config import load_config_and_class
+from config import load_config_and_class
 
 def init_model(args: Namespace) -> Dict:
     """

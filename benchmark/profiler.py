@@ -7,7 +7,7 @@ from functools import partial, cache
 from typing import Optional, Tuple, Dict, List, Any, Callable, Sequence
 from argparse import Namespace
 from transformers import AutoTokenizer
-from transformers.models import PreTrainedModel
+from transformers import PreTrainedModel
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.cache_utils import Cache
 from torch.profiler import record_function
