@@ -4,7 +4,7 @@ import torch.nn as nn
 from typing import Optional, Tuple, Dict, List, Union, Any
 
 from transformers import PretrainedConfig
-from transformers.models import PreTrainedModel
+from transformers import PreTrainedModel
 from transformers.cache_utils import Cache
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from transformers.generation import GenerationMixin

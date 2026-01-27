@@ -8,8 +8,8 @@ from benchmark.profiler import ModelProfiler
 def parse_args():
     parser = argparse.ArgumentParser(description="Pruning Wrapper")
     parser.add_argument("--seed", type=int, default=17, help="Random seed")
-    parser.add_argument("--model_name", type=str, required=True, help="Model name")
-    parser.add_argument("--model_path", type=str, required=True, help="Path to the model")
+    parser.add_argument("--model_name", type=str, default='', help="Model name")
+    parser.add_argument("--model_path", type=str, default='', help="Path to the model")
     parser.add_argument("--dynamic", type=str, default="token_dynamic", help="Dynamic type")
     parser.add_argument("--style", type=str, default="skipgpt", help="Wrapper style")
 
@@ -26,6 +26,10 @@ def parse_args():
 def main():
     args = parse_args()
     set_seed(args.seed)
+
+    args.model_name = 'qwen3-4b'
+    args.model_path = '/root/autodl-tmp/modelscope_cache/qwen3_4b'
+    args.liger_kernel = True
 
     if args.liger_kernel:
         from liger_kernel.transformers import apply_liger_kernel_to_llama, apply_liger_kernel_to_qwen3, apply_liger_kernel_to_qwen2

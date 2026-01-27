@@ -4,7 +4,7 @@ import torch.nn as nn
 
 from typing import Optional, Dict, List
 from argparse import Namespace
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig
 
 from config import load_config_and_class
 
@@ -22,10 +22,15 @@ def init_model(args: Namespace) -> Dict:
     
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
     model = AutoModelForCausalLM.from_pretrained(model_path, trust_remote_code=True, dtype=torch.bfloat16)
+    config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
 
     # apply wrapper
     wrapper_config, wrapper_cls = load_config_and_class(args)
-    model = wrapper_cls(model, wrapper_config)
+    model = wrapper_cls(
+        config=config,
+        pruning_config=wrapper_config,
+        block=model,
+    )
 
     model.post_load()
     

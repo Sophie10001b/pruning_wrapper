@@ -5,7 +5,7 @@ from typing import Optional, Tuple, Dict, List, Union, Any
 from einops import rearrange
 
 from transformers import PretrainedConfig
-from transformers.models import PreTrainedModel
+from transformers import PreTrainedModel
 from transformers.cache_utils import Cache
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from transformers.generation import GenerationMixin
@@ -14,6 +14,33 @@ from transformers.generation.utils import GenerateOutput
 from ops import __ATTENTION__, __MLP__, __ROUTER__, __KV_CACHE__, __APPROXIMATOR__
 from ops.utils import triton_rmsnorm, triton_rope_qk_align
 from wrapper.base import PrunedModelForCausalLM
+
+def dispatch(key, candidates: Dict[str, Any], default: str, **kwargs):
+    if default is None: default = 'null'
+    cls = candidates.get(key, candidates.get(default, None))
+    if cls is None: return None
+    else: return cls(**kwargs)
+
+def get_router_group_num(config: PretrainedConfig, prefix: str, pruning_type: str, block_size: Optional[int]=1):
+    if prefix == 'attention':
+        if pruning_type in ['query']: return 1
+        elif pruning_type in ['group']: return config.num_key_value_heads
+        elif pruning_type in ['head']: return config.num_attention_heads
+    elif prefix == 'ffn':
+        if pruning_type in ['bm']: return 1
+        elif pruning_type in ['bn']: return config.intermediate_size // block_size
+    elif prefix in ['up_proj', 'gate_proj']:
+        if pruning_type in ['bm']: return 1
+        elif pruning_type in ['bn']: return config.intermediate_size // block_size
+        elif pruning_type in ['bk']: return config.hidden_size // block_size
+    elif prefix == 'down_proj':
+        if pruning_type in ['bm']: return 1
+        elif pruning_type in ['bn']: return config.hidden_size // block_size
+        elif pruning_type in ['bk']: return config.intermediate_size // block_size
+    else:
+        if pruning_type in ['bm']: return 1
+        elif pruning_type in ['bn', 'bk']: return config.hidden_size // block_size
+
 
 #################### FFN ####################
 class SkipGPTMLP(nn.Module):
@@ -27,11 +54,14 @@ class SkipGPTMLP(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
+        pruning_config: Dict[str, Any],
         block: nn.Module,
         **kwargs,
     ):
         super().__init__()
+        self._support_pruning_components = ['ffn.', 'ffn.up_proj', 'ffn.gate_proj', 'ffn.down_proj']
         self.config = config
+        self.pruning_config = pruning_config
         self.hidden_size = config.hidden_size
         self.intermediate_size = config.intermediate_size
         self.activation = config.hidden_act
@@ -41,37 +71,32 @@ class SkipGPTMLP(nn.Module):
         self.down_proj = block.down_proj
 
         # ffn pruning impl
-        self.ffn_pruning_type = 'base'
-        self.up_proj_pruning_type = 'base'
-        self.gate_proj_pruning_type = 'base'
-        self.down_proj_pruning_type = 'base'
-
-        if self.ffn_pruning_type in ['bm']:
-            self.up_proj_pruning_type = 'bm'
-            self.gate_proj_pruning_type = 'bm'
-            self.down_proj_pruning_type = 'bm'
-        elif self.ffn_pruning_type in ['bn']:
-            self.up_proj_pruning_type = 'bn'
-            self.gate_proj_pruning_type = 'bn'
-            self.down_proj_pruning_type = 'bk'
-        
-        # check bias, atomic reduction do not support bias
-        if self.up_proj_pruning_type == 'bk': assert self.up_proj.bias is None
-        if self.gate_proj_pruning_type == 'bk': assert self.gate_proj.bias is None
-        if self.down_proj_pruning_type == 'bk': assert self.down_proj.bias is None
+        for key in self._support_pruning_components:
+            prefix, suffix = key.split('.')
+            if suffix == '': setattr(self, f'{prefix}_kwargs', self.pruning_config.get(prefix, {}))
+            else: setattr(self, f'{suffix}_kwargs', self.pruning_config[prefix].get(suffix, {}))
         
         self.ffn_impl = None
         self.up_proj_impl = None
         self.gate_proj_impl = None
         self.down_proj_impl = None
-
-        # fuse ffn kernel
-        if self.ffn_pruning_type != 'base':
-            self.ffn_impl: nn.Module = __MLP__[self.ffn_pruning_type]
-        else:
-            self.up_proj_impl: nn.Module = __MLP__[self.up_proj_pruning_type]
-            self.gate_proj_impl: nn.Module = __MLP__[self.gate_proj_pruning_type]
-            self.down_proj_impl: nn.Module = __MLP__[self.down_proj_pruning_type]
+    
+    def _init_impl(self):
+        for key in self._support_pruning_components:
+            prefix, suffix = key.split('.')
+            if suffix == '': suffix = prefix
+            pruning_type = getattr(self, f'{suffix}_kwargs', 'pruning_type', None)
+            if pruning_type is None: continue
+            impl_name = f'{suffix}_impl'
+            setattr(
+                self,
+                impl_name,
+                dispatch(
+                    pruning_type,
+                    __MLP__,
+                    'base',
+                ),
+            )
     
     def forward(
         self,
@@ -91,9 +116,7 @@ class SkipGPTMLP(nn.Module):
                 b_gate=self.gate_proj.bias,
                 route_mask=route_mask,
                 activation=self.activation,
-                estimated_sparsity=kwargs.get('estimated_sparsity', 0),
-                prefill_impl='auto',
-                decode_impl='auto',
+                **getattr(self, f'ffn_kwargs', {}), # pruning_type, backend, estimated_sparsity, prefill_impl, decode_impl, etc.
             )
         else:
             up_output = self.up_proj_impl(
@@ -101,9 +124,7 @@ class SkipGPTMLP(nn.Module):
                 w_up=self.up_proj.weight,
                 b_up=self.up_proj.bias,
                 route_mask=pruning_kwargs.get('up_proj', route_mask),
-                estimated_sparsity=kwargs.get('estimated_sparsity', 0),
-                prefill_impl='auto',
-                decode_impl='auto',
+                **getattr(self, f'up_proj_kwargs', {}),
             )
             gate_output = self.gate_proj_impl(
                 hidden_states,
@@ -111,9 +132,7 @@ class SkipGPTMLP(nn.Module):
                 b_up=self.gate_proj.bias,
                 route_mask=pruning_kwargs.get('gate_proj', route_mask),
                 activation=self.activation,
-                estimated_sparsity=kwargs.get('estimated_sparsity', 0),
-                prefill_impl='auto',
-                decode_impl='auto',
+                **getattr(self, f'gate_proj_kwargs', {}),
             )
             ffn_output = up_output * gate_output
             ffn_output = self.down_proj_impl(
@@ -121,9 +140,7 @@ class SkipGPTMLP(nn.Module):
                 w_up=self.down_proj.weight,
                 b_up=self.down_proj.bias,
                 route_mask=pruning_kwargs.get('down_proj', route_mask),
-                estimated_sparsity=kwargs.get('estimated_sparsity', 0),
-                prefill_impl='auto',
-                decode_impl='auto',
+                **getattr(self, f'down_proj_kwargs', {}),
             )
         
         return ffn_output
@@ -140,11 +157,14 @@ class SkipGPTAttention(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
+        pruning_config: Dict[str, Any],
         block: nn.Module,
         **kwargs,
     ):
         super().__init__()
+        self._support_pruning_components = ['attention.', 'attention.q_proj', 'attention.k_proj', 'attention.v_proj', 'attention.o_proj']
         self.config = config
+        self.pruning_config = pruning_config
         self.layer_idx = block.layer_idx
         self.head_dim = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
         self.num_key_value_groups = config.num_attention_heads // config.num_key_value_heads
@@ -161,25 +181,43 @@ class SkipGPTAttention(nn.Module):
         self.k_norm = getattr(block, "k_norm", None)
 
         # attention pruning impl
-        self.attention_pruning_type = 'base'
-        self.q_proj_pruning_type = 'base'
-        self.k_proj_pruning_type = 'base'
-        self.v_proj_pruning_type = 'base'
-        self.o_proj_pruning_type = 'base'
+        for key in self._support_pruning_components:
+            prefix, suffix = key.split('.')
+            if suffix == '': setattr(self, f'{prefix}_kwargs', self.pruning_config.get(prefix, {}))
+            else: setattr(self, f'{suffix}_kwargs', self.pruning_config[prefix].get(suffix, {}))
+        
+        if self.attention_kwargs['pruning_type'] == 'query':
+            for key in ['q_proj', 'o_proj']:
+                attr = getattr(self, f'{key}_kwargs', {})
+                attr['pruning_type'] = 'bm'
+        elif self.attention_kwargs['pruning_type'] in ['group', 'head']:
+            self.q_proj_kwargs['pruning_type'] = 'bn'
+            self.o_proj_kwargs['pruning_type'] = 'bk'
 
-        if self.attention_pruning_type in ['query', 'group', 'head']:
-            if self.attention_pruning_type in ['query']:
-                self.q_proj_pruning_type = 'bm'
-                self.o_proj_pruning_type = 'bm'
-            else:
-                self.q_proj_pruning_type = 'bn'
-                self.o_proj_pruning_type = 'bk'
-
-        self.q_proj_impl: nn.Module = __MLP__[self.q_proj_pruning_type]
-        self.k_proj_impl: nn.Module = __MLP__[self.k_proj_pruning_type]
-        self.v_proj_impl: nn.Module = __MLP__[self.v_proj_pruning_type]
-        self.o_proj_impl: nn.Module = __MLP__[self.o_proj_pruning_type]
-        self.attention_impl: nn.Module = __ATTENTION__[self.attention_pruning_type]
+        # attention pruning impl
+        self.q_proj_impl = None
+        self.k_proj_impl = None
+        self.v_proj_impl = None
+        self.o_proj_impl = None
+        self.attention_impl = None
+        self._init_impl()
+    
+    def _init_impl(self):
+        for key in self._support_pruning_components:
+            prefix, suffix = key.split('.')
+            if suffix == '': suffix = prefix
+            pruning_type = getattr(self, f'{suffix}_kwargs', {}).get('pruning_type', None)
+            if pruning_type is None: continue
+            impl_name = f'{suffix}_impl'
+            setattr(
+                self,
+                impl_name,
+                dispatch(
+                    pruning_type,
+                    __MLP__ if suffix != 'attention' else __ATTENTION__,
+                    'base',
+                ),
+            )
     
     def forward(
         self,
@@ -192,25 +230,27 @@ class SkipGPTAttention(nn.Module):
         pruning_kwargs: Optional[Dict[str, Any]]=None,
         **kwargs,
     ) -> torch.Tensor:
-        route_mask = pruning_kwargs.get('attn', None)
+        route_mask = pruning_kwargs.get('attention', None)
         q = self.q_proj_impl(
             hidden_states,
             w_up=self.q_proj.weight,
             b_up=self.q_proj.bias,
             route_mask=pruning_kwargs.get('q_proj', route_mask),
-            estimated_sparsity=kwargs.get('estimated_sparsity', 0),
-            prefill_impl='auto',
-            decode_impl='auto',
+            **getattr(self, f'q_proj_kwargs', {}),
         )
         k = self.k_proj_impl(
             hidden_states,
             w_up=self.k_proj.weight,
             b_up=self.k_proj.bias,
+            route_mask=pruning_kwargs.get('k_proj', route_mask),
+            **getattr(self, f'k_proj_kwargs', {}),
         )
         v = self.v_proj_impl(
             hidden_states,
             w_up=self.v_proj.weight,
             b_up=self.v_proj.bias,
+            route_mask=pruning_kwargs.get('v_proj', route_mask),
+            **getattr(self, f'v_proj_kwargs', {}),
         )
 
         q, k, v = list(map(lambda x: rearrange(x, '... (h d) -> ... h d', d=self.head_dim), [q, k, v]))
@@ -230,9 +270,7 @@ class SkipGPTAttention(nn.Module):
             attention_mask=attention_mask,
             pad_offset=pad_offset,
             route_mask=route_mask,
-            estimated_sparsity=kwargs.get('estimated_sparsity', 0),
-            prefill_impl='auto',
-            decode_impl='auto',
+            **getattr(self, f'attention_kwargs', {}),
         )
         attn_output = rearrange(attn_output, '... h d -> ... (h d)')
         attn_output = self.o_proj_impl(
@@ -240,9 +278,7 @@ class SkipGPTAttention(nn.Module):
             w_up=self.o_proj.weight,
             b_up=self.o_proj.bias,
             route_mask=pruning_kwargs.get('o_proj', route_mask),
-            estimated_sparsity=kwargs.get('estimated_sparsity', 0),
-            prefill_impl='auto',
-            decode_impl='auto',
+            **getattr(self, f'o_proj_kwargs', {}),
         )
 
         return attn_output
@@ -255,11 +291,15 @@ class SkipGPTDecoderLayer(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
+        pruning_config: Dict[str, Any],
         block: nn.Module,
         layer_idx: int,
         **kwargs,
     ):
         super().__init__()
+        self._support_pruning_components = ['layer.', 'attention.', 'ffn.', 'ffn.up_proj', 'ffn.gate_proj', 'ffn.down_proj']
+        self.config = config
+        self.pruning_config = pruning_config
         self.layer_idx = layer_idx
         self.input_layernorm = block.input_layernorm
         self.post_attention_layernorm = block.post_attention_layernorm
@@ -270,76 +310,76 @@ class SkipGPTDecoderLayer(nn.Module):
         self.num_key_value_heads = config.num_key_value_heads
         self.num_key_value_groups = self.num_attention_heads // self.num_key_value_heads
         self.head_dim = config.hidden_size // self.num_attention_heads
-        
-        self.self_attn = SkipGPTAttention(config, block.self_attn, **kwargs)
-        self.mlp = SkipGPTMLP(config, block.mlp, **kwargs)
 
         # router init
         self.layer_router = None
-        self.attn_router = None
+        self.attention_router = None
         self.ffn_router = None
         self.up_proj_router = None
         self.gate_proj_router = None
         self.down_proj_router = None
 
-        self.router_type = kwargs.get('router_type', None)
         # 'diff' for ffn router generate mask after attn block finished
-        self.router_order = kwargs.get('router_order', 'same')
-        
-        self.layer_pruning = kwargs.get('layer_pruning', False)
+        self.router_order = self.pruning_config['ffn'].get('router', {}).get('router_order', 'same')
+        self.layer_pruning = self.pruning_config['layer'].get('pruning_type', None) is not None
         if self.layer_pruning:
-            # 1. if is depth-wise pruning
-            self.layer_router = __ROUTER__[self.router_type](
-                self.hidden_size,
-                rank_size=kwargs.get('router_rank_size', None),
-                num_groups=1,
-            )
-        else:
-            self.attn_router = __ROUTER__[self.router_type](
-                self.hidden_size,
-                rank_size=kwargs.get('router_rank_size', None),
-                num_groups=kwargs.get('attn_router_num_groups', 1),
-            )
-            # 2. if is fused ffn pruning
-            if self.mlp.ffn_impl is not None:
-                self.ffn_router = __ROUTER__[self.router_type](
-                    self.hidden_size,
-                    rank_size=kwargs.get('router_rank_size', None),
-                    num_groups=kwargs.get('ffn_router_num_groups', 1),
-                )
-            else:
-                self.up_proj_router = __ROUTER__[self.router_type](
-                    self.hidden_size,
-                    rank_size=kwargs.get('router_rank_size', None),
-                    num_groups=kwargs.get('up_proj_router_num_groups', 1),
-                )
-                self.gate_proj_router = __ROUTER__[self.router_type](
-                    self.hidden_size,
-                    rank_size=kwargs.get('router_rank_size', None),
-                    num_groups=kwargs.get('gate_proj_router_num_groups', 1),
-                )
-                self.down_proj_router = __ROUTER__[self.router_type](
-                    self.hidden_size,
-                    rank_size=kwargs.get('router_rank_size', None),
-                    num_groups=kwargs.get('down_proj_router_num_groups', 1),
-                )
+            # equal to query & bm pruning
+            self.pruning_config['attention']['pruning_type'] = 'query'
+            self.pruning_config['attention']['router']['router_type'] = None
+            self.pruning_config['ffn']['pruning_type'] = 'bm'
+            self.pruning_config['ffn']['router']['router_type'] = None
+        
+        if self.pruning_config['ffn']['pruning_type'] != None:
+            self.pruning_config['ffn']['up_proj']['pruning_type'] = None
+            self.pruning_config['ffn']['gate_proj']['pruning_type'] = None
+            self.pruning_config['ffn']['down_proj']['pruning_type'] = None
+        
+        self._init_router()
         
         # approximator init
         self.layer_approximator = None
         self.attn_approximator = None
         self.ffn_approximator = None
+        
+        self.self_attn = SkipGPTAttention(config, pruning_config, block.self_attn, **kwargs)
+        self.mlp = SkipGPTMLP(config, pruning_config, block.mlp, **kwargs)
+    
+    def _init_router(self):
+        for key in self._support_pruning_components:
+            prefix, suffix = key.split('.')
+            router_type = self.pruning_config[prefix]['router'].get('router_type', None)
+            rank_size = self.pruning_config[prefix]['router'].get('router_rank_size', 16)
 
-        self.approximator_type = kwargs.get('approximator_type', None)
-        if self.layer_approximator is not None:
-            self.layer_approximator = __APPROXIMATOR__[self.approximator_type](
-                self.hidden_size,
-                rank_size=kwargs.get('approximator_rank_size', None),
+            if suffix == '':
+                pruning_config = self.pruning_config[prefix]
+                suffix = prefix
+            else:
+                pruning_config = self.pruning_config[prefix][suffix]
+
+            pruning_type = pruning_config.get('pruning_type', None)
+            if pruning_type is None or router_type is None: continue
+
+            block_size = pruning_config.get('block_size', 1)
+            num_groups = get_router_group_num(self.config, suffix, pruning_type, block_size)
+            if router_type == None: continue
+            router_name = f'{suffix}_router'
+            setattr(
+                self,
+                router_name,
+                dispatch(
+                    router_type,
+                    __ROUTER__,
+                    None,
+                    hidden_size=self.hidden_size,
+                    rank_size=rank_size,
+                    num_groups=num_groups,
+                ),
             )
     
     def generate_pruning_kwargs(
         self,
         hidden_states: torch.Tensor,
-        pruning_targets: List[str]=['layer', 'attn', 'ffn', 'up_proj', 'gate_proj', 'down_proj'],
+        pruning_targets: List[str]=['layer', 'attention', 'ffn', 'up_proj', 'gate_proj', 'down_proj'],
         estimated_sparsity: Optional[float]=-1,
     ) -> Dict[str, torch.Tensor]:
         pruning_kwargs = {}
@@ -348,7 +388,7 @@ class SkipGPTDecoderLayer(nn.Module):
             if hasattr(self, router_name):
                 route = getattr(self, router_name)(hidden_states)[0]
                 if name == 'layer':
-                    pruning_kwargs['attn'] = pruning_kwargs['ffn'] = route
+                    pruning_kwargs['attention'] = pruning_kwargs['ffn'] = route
                 else:
                     pruning_kwargs[name] = route
                 
@@ -434,15 +474,17 @@ class SkipGPTModel(SkipGPTPretrainedModel):
     def __init__(
         self,
         config: PretrainedConfig,
+        pruning_config: Dict[str, Any],
         block: PreTrainedModel,
         **kwargs,
     ):
         super().__init__(config)
+        self.pruning_config = pruning_config
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
         self.embed_tokens = block.embed_tokens
-        self.layers = nn.ModuleList([SkipGPTDecoderLayer(config, block.layers[i], i) for i in range(config.num_hidden_layers)])
+        self.layers = nn.ModuleList([SkipGPTDecoderLayer(config, pruning_config, block.layers[i], i) for i in range(config.num_hidden_layers)])
         self.norm = block.norm
         self.rotary_emb = block.rotary_emb
     
@@ -465,7 +507,7 @@ class SkipGPTModel(SkipGPTPretrainedModel):
             inputs_embeds: torch.Tensor = self.embed_tokens(input_ids)
         
         if use_cache and past_key_values is None:
-            past_key_values = __KV_CACHE__[self.config.cache_type](self.config)
+            past_key_values = __KV_CACHE__[self.pruning_config.get('cache_type', 'base')](self.config)
         
         if cache_position is None:
             past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
@@ -503,11 +545,12 @@ class SkipGPTForCausalLM(PrunedModelForCausalLM):
     def __init__(
         self,
         config: PretrainedConfig,
+        pruning_config: Dict[str, Any],
         block: PreTrainedModel,
         **kwargs,
     ):
         super().__init__(config, block, **kwargs)
-        self.model = SkipGPTModel(config, block, **kwargs)
+        self.model = SkipGPTModel(config, pruning_config, block.model, **kwargs)
     
     # Generate random route mask for benchmark
     def generate_pruning_kwargs(self, **kwargs) -> Dict[str, torch.Tensor]:

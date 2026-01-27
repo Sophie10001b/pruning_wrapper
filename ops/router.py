@@ -13,11 +13,6 @@ class Router(nn.Module):
     """
     def __init__(self, *args, **kwargs):
         super().__init__()
-        if self.training:
-            for name, module in self.named_modules():
-                if isinstance(module, nn.Linear):
-                    nn.init.kaiming_uniform_(module.weight, nonlinearity='linear')
-                    if module.bias is not None: nn.init.zeros_(module.bias, 0)
     
     def load_router_dict(
         self,
@@ -41,6 +36,7 @@ class Router(nn.Module):
         route = route.argmax(dim=-1).to(torch.bool)
         route_neg = route.logical_not()
         return (route_neg, route) if skip_dim == 1 else (route, route_neg)
+
 class LinearRouter(Router):
     """
     Use a single projection matrix for generating route indices:
@@ -55,6 +51,7 @@ class LinearRouter(Router):
         skip_dim: Optional[int]=1,
         **kwargs,
     ):
+        super().__init__()
         self.hidden_size = hidden_size
         self.num_groups = num_groups
         self.group_size = hidden_size // num_groups
@@ -68,7 +65,12 @@ class LinearRouter(Router):
 
         self.components = ['router']
 
-        super().__init__()
+        if self.training:
+            for name, module in self.named_modules():
+                if isinstance(module, nn.Linear):
+                    nn.init.kaiming_uniform_(module.weight, nonlinearity='linear')
+                    if module.bias is not None: nn.init.zeros_(module.bias)
+        
     
     def forward(
         self,
@@ -96,6 +98,7 @@ class BottleneckRouter(Router):
         update_freq: Optional[str]='token',
         **kwargs,
     ):
+        super().__init__()
         self.hidden_size = hidden_size
         self.rank_size = rank_size
         self.num_groups = num_groups
@@ -106,7 +109,11 @@ class BottleneckRouter(Router):
         
         self.components = ['down_proj', 'router']
 
-        super().__init__()
+        if self.training:
+            for name, module in self.named_modules():
+                if isinstance(module, nn.Linear):
+                    nn.init.kaiming_uniform_(module.weight, nonlinearity='linear')
+                    if module.bias is not None: nn.init.zeros_(module.bias)
     
     def forward(
         self,

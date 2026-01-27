@@ -39,13 +39,14 @@ def load_config_and_class(args: Namespace):
     """
     dynamic = getattr(args, "dynamic", 'token_dynamic')
     style = getattr(args, "style", 'skipgpt')
+    config_name = getattr(args, "config_name", style)
 
     # Load all wrapper classes for the specified dynamic type
     _load_wrapper_classes(dynamic)
 
     # Load yaml config
     base_path = os.path.dirname(os.path.abspath(__file__))
-    config_path = os.path.join(base_path, f"wrapper/{dynamic}/{style}.yaml")
+    config_path = os.path.join(base_path, f"wrapper/{dynamic}/{config_name}.yaml")
     
     if not os.path.exists(config_path):
         raise FileNotFoundError(f"Config file not found: {config_path}")

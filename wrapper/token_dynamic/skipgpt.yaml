@@ -1,7 +1,8 @@
 cache_type: base
 
-approximator_type: null
-approximator_rank_size: 16
+approximator:
+  approximator_type: null
+  approximator_rank_size: 16
 
 layer:
   estimated_sparsity: 0.5
@@ -25,6 +26,34 @@ attention:
   router:
     router_type: bottleneck
     router_rank_size: 16
+  
+  q_proj:
+    estimated_sparsity: 0.5
+    pruning_type: null
+    backend: triton
+    prefill_impl: auto
+    decode_impl: auto
+  
+  k_proj:
+    estimated_sparsity: 0.5
+    pruning_type: null
+    backend: triton
+    prefill_impl: auto
+    decode_impl: auto
+  
+  v_proj:
+    estimated_sparsity: 0.5
+    pruning_type: null
+    backend: triton
+    prefill_impl: auto
+    decode_impl: auto
+  
+  o_proj:
+    estimated_sparsity: 0.5
+    pruning_type: null
+    backend: triton
+    prefill_impl: auto
+    decode_impl: auto
 
 # [base, bm, bn, bk]
 ffn:
@@ -40,7 +69,7 @@ ffn:
     router_rank_size: 16
     router_order: diff
 
-  up:
+  up_proj:
     block_size: 128
     estimated_sparsity: 0.5
     pruning_type: bn
@@ -48,7 +77,7 @@ ffn:
     prefill_impl: auto
     decode_impl: auto
   
-  gate:
+  gate_proj:
     block_size: 128
     estimated_sparsity: 0.5
     pruning_type: bn
@@ -56,7 +85,7 @@ ffn:
     prefill_impl: auto
     decode_impl: auto
   
-  down:
+  down_proj:
     block_size: 128
     estimated_sparsity: 0.5
     pruning_type: bn
