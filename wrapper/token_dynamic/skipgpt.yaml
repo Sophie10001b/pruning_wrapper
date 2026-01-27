@@ -24,7 +24,6 @@ attention:
 
   router:
     router_type: bottleneck
-    router_order: diff
     router_rank_size: 16
 
 # [base, bm, bn, bk]
@@ -35,6 +34,11 @@ ffn:
   backend: triton
   prefill_impl: auto
   decode_impl: auto
+
+  router:
+    router_type: bottleneck
+    router_rank_size: 16
+    router_order: diff
 
   up:
     block_size: 128
