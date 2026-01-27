@@ -632,7 +632,7 @@ class BNSparseGLUBKSparseMLP:
             wd: tl.tensor_descriptor, # [K, N]
             bu: tl.tensor,
             bg: tl.tensor,
-            out: tl.tensor_descriptor,
+            out: tl.tensor,
             M: tl.int64,
             N: tl.constexpr,
             K: tl.constexpr,
@@ -658,9 +658,10 @@ class BNSparseGLUBKSparseMLP:
             skip_flag = tl.load(route_mask + nid * BLOCK_NUM_M + mid)
             if skip_flag > 0:
                 bm_indices = route_indices.load([nid, mid * BLOCK_M])
+                bm_indices = tl.reshape(bm_indices, (BLOCK_M,))
                 bm_mask = bm_indices >= 0
                 bm_indices = tl.where(bm_mask, bm_indices, 0)
-
+                
                 bn_offset = (nid * G_iter + gid) * BLOCK_N + tl.arange(0, BLOCK_N)
                 bn_offset = tl.max_contiguous(tl.multiple_of(bn_offset, BLOCK_N), BLOCK_N)
                 for i in tl.range(0, tl.cdiv(K, BLOCK_K)):
@@ -684,14 +685,18 @@ class BNSparseGLUBKSparseMLP:
                 acc_up *= acc_gate
 
                 # calculate down_proj across all K-axis
+                bk_offset = tl.arange(0, BLOCK_K)
                 for i in tl.range(0, tl.cdiv(K, BLOCK_K)):
                     wd_data = wd.load([i * BLOCK_K, (nid * G_iter + gid) * BLOCK_N])
-                    acc_down = tl.dot(acc_up.to(x.dtype.element_ty), wd_data.T, out_dtype=tl.float32) # [BM, BK]
-
-                    out.atomic_add(
-                        [bm_indices, i * BLOCK_K],
-                        acc_down.to(x.dtype.element_ty),
+                    acc_down = tl.dot(acc_up.to(x.dtype), wd_data.T, out_dtype=tl.float32) # [BM, BK]
+                    tl.atomic_add(
+                        out + bm_indices[:, None] * K + bk_offset[None, :],
+                        acc_down.to(x.dtype),
+                        mask=bm_mask[:, None],
+                        sem='relaxed',
                     )
+
+                    bk_offset += BLOCK_K
         
         B, L, D = x.shape
         _, _, NG = route_mask.shape
@@ -708,7 +713,7 @@ class BNSparseGLUBKSparseMLP:
         m_sort_pad = torch.nn.functional.pad(m_sort, (0, BLOCK_M - M % BLOCK_M), value=0).reshape(NG, -1, BLOCK_M)
         m_sort_pad = m_sort_pad.any(dim=-1)
         m_sort_indices = m_sort_indices.masked_fill(m_sort.logical_not(), -1)
-        m_sort_indices_pad = torch.nn.functional.pad(m_sort_indices, (0, BLOCK_M - M % BLOCK_M), value=-1)
+        m_sort_indices_pad = torch.nn.functional.pad(m_sort_indices.to(torch.int32), (0, BLOCK_M - M % BLOCK_M), value=-1)
 
         out = torch.zeros((M, K), dtype=x.dtype, device=x.device)
         grid = lambda META: (triton.cdiv(M, BLOCK_M), NG, G_iter)
@@ -719,11 +724,10 @@ class BNSparseGLUBKSparseMLP:
         wu_tma = TensorDescriptor.from_tensor(wu, [BLOCK_N, BLOCK_K])
         wg_tma = TensorDescriptor.from_tensor(wg, [BLOCK_N, BLOCK_K])
         wd_tma = TensorDescriptor.from_tensor(wd, [BLOCK_K, BLOCK_N])
-        out_tma = TensorDescriptor.from_tensor(out, [1, BLOCK_K])
 
         glu_fuse_splitk_mlp[grid](
             x_tma, m_sort_pad, indices_tma,
-            wu_tma, wg_tma, wd_tma, bu, bg, out_tma,
+            wu_tma, wg_tma, wd_tma, bu, bg, out,
             M, N, K,
             HAS_BIAS_UP=bu is not None,
             HAS_BIAS_GATE=bg is not None,
