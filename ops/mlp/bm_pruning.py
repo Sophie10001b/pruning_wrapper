@@ -60,7 +60,7 @@ class BMSparseMLPKernel(_PruningMLPKernel):
         """
 
         if (w_down is None) and (w_gate is None): # single mlp layer
-            res = BMSparseMLP.kernel(
+            res, meta = BMSparseMLP.kernel(
                 x=x,
                 route_mask=route_mask,
                 w=w_up,
@@ -70,7 +70,7 @@ class BMSparseMLPKernel(_PruningMLPKernel):
                 **kwargs,
             )
         elif w_down is None: # glu
-            res = BMSparseGLU.kernel(
+            res, meta = BMSparseGLU.kernel(
                 x=x,
                 route_mask=route_mask,
                 wu=w_up,
@@ -84,7 +84,7 @@ class BMSparseMLPKernel(_PruningMLPKernel):
             )
         else: # glu + down_proj fuse
             if impl != 'seperate':
-                res = BMSparseGLUBMSparseMLP.kernel(
+                res, meta = BMSparseGLUBMSparseMLP.kernel(
                     x=x,
                     route_mask=route_mask,
                     wu=w_up,
@@ -98,7 +98,7 @@ class BMSparseMLPKernel(_PruningMLPKernel):
                     **kwargs,
                 )
             else:
-                res = BMSparseGLU.kernel(
+                res, meta = BMSparseGLU.kernel(
                     x=x,
                     route_mask=route_mask,
                     wu=w_up,
@@ -110,16 +110,17 @@ class BMSparseMLPKernel(_PruningMLPKernel):
                     impl='auto',
                     **kwargs,
                 )
-                res = BMSparseMLP.kernel(
+                meta.update(**kwargs)
+                res, meta = BMSparseMLP.kernel(
                     x=res,
                     route_mask=route_mask,
                     w=w_down,
                     estimated_sparsity=estimated_sparsity,
                     impl='auto',
-                    **kwargs,
+                    **meta,
                 )
 
-        return res
+        return res, meta
 
     @classmethod
     def base_decode(cls, **kwargs):

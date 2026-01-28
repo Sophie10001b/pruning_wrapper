@@ -240,19 +240,20 @@ class QuerySparseDecode:
 
             NBK_mask = tl.arange(0, NBK2) < NBK
             is_active = tl.load(route_mask + batch_id)
+            split_range = tl.arange(0, NBK2)
             if is_active == 1:
                 acc = tl.load(
-                    out_tmp + (batch_id * HQ + query_head_id) * NBK * D + (tl.arange(0, NBK2) * D)[:, None] + tl.arange(0, D)[None, :],
+                    out_tmp + (batch_id * HQ + query_head_id) * NBK * D + (split_range * D)[:, None] + tl.arange(0, D)[None, :],
                     mask=NBK_mask[:, None],
                     other=0.0
                 )
                 score_max = tl.load(
-                    metadata + (batch_id * HQ + query_head_id) * 2 * NBK + tl.arange(0, NBK2),
+                    metadata + (batch_id * HQ + query_head_id) * 2 * NBK + split_range,
                     mask=NBK_mask,
                     other=-float('inf')
                 )
                 score_sum = tl.load(
-                    metadata + (batch_id * HQ + query_head_id) * 2 * NBK + NBK + tl.arange(0, NBK2),
+                    metadata + (batch_id * HQ + query_head_id) * 2 * NBK + NBK + split_range,
                     mask=NBK_mask,
                     other=0.0
                 )

@@ -1,4 +1,5 @@
 import argparse
+import torch
 
 from transformers import set_seed
 
@@ -12,6 +13,7 @@ def parse_args():
     parser.add_argument("--model_path", type=str, default='', help="Path to the model")
     parser.add_argument("--dynamic", type=str, default="token_dynamic", help="Dynamic type")
     parser.add_argument("--style", type=str, default="skipgpt", help="Wrapper style")
+    parser.add_argument("--config_name", type=str, default="")
     parser.add_argument("--device", type=str, default="cuda:0", help="Device")
 
     parser.add_argument("--benchmark_metric", type=str, default="ttft", help="Benchmark metric")
@@ -32,25 +34,50 @@ def main():
 
     args.model_name = 'qwen3-4b'
     args.model_path = '/root/autodl-tmp/modelscope_cache/qwen3_4b'
+
+    args.dynamic = 'token_dynamic'
+    args.style = 'skipgpt'
+    args.config_name = 'bm'
+
+    # args.dynamic = 'static'
+    # args.style = 'dense'
+    # args.config_name = 'dense'
+
     args.liger_kernel = True
-    args.num_repeat = 10
+    args.benchmark_metric = "tpot"
+    args.num_repeat = 100
+    args.torch_profiler = False
+    args.cuda_graph = True
+    args.sparsity = 0.5
+
+    args.batch_size = 16
+    args.seq_len = 2048
 
     if args.liger_kernel:
         from liger_kernel.transformers import apply_liger_kernel_to_llama, apply_liger_kernel_to_qwen3, apply_liger_kernel_to_qwen2
-        liger_kernel_kwargs = {'rope': False, 'rms_norm': True, 'swiglu': False}
+        liger_kernel_kwargs = {'rope': True, 'rms_norm': True, 'swiglu': True}
         apply_liger_kernel_to_llama(**liger_kernel_kwargs)
         apply_liger_kernel_to_qwen2(**liger_kernel_kwargs)
         apply_liger_kernel_to_qwen3(**liger_kernel_kwargs)
+    
+    cc = torch.cuda.get_device_capability("cuda")[0]
+    dtype = torch.float16 if cc < 9 else torch.bfloat16
+    print(f"[INFO] CUDA capability: {cc}, using dtype {dtype}")
 
     model, tokenizer = init_model(args)
+    print("[INFO] Model initialize successfully:")
+    print(model)
+
     profiler = ModelProfiler(
         model=model,
         tokenizer=tokenizer,
         args=args,
+        dtype=dtype,
     )
 
     if args.benchmark_metric == "ttft":
-        profile_res = profiler.profile_ttft(
+        token_num = args.batch_size * args.seq_len
+        ms, min_ms, max_ms = profiler.profile_ttft(
             batch_size=args.batch_size,
             seq_len=args.seq_len,
             warmup=args.num_warmup,
@@ -58,8 +85,11 @@ def main():
             cuda_graph=args.cuda_graph,
             sparsity=args.sparsity,
         )
+        print(f"[INFO] TTFT: {ms:.4f} ms, min: {min_ms:.4f} ms, max: {max_ms:.4f} ms")
+        print(f"[INFO] Throughput: {(token_num / ms) * 1000.0:.4f} tokens/sec, min: {(token_num / max_ms) * 1000.0:.4f} tokens/sec, max: {(token_num / min_ms) * 1000.0:.4f} tokens/sec")
     elif args.benchmark_metric == "tpot":
-        profile_res = profiler.profile_tpot(
+        token_num = args.batch_size
+        ms, min_ms, max_ms = profiler.profile_tpot(
             batch_size=args.batch_size,
             seq_len=args.seq_len,
             warmup=args.num_warmup,
@@ -67,6 +97,8 @@ def main():
             cuda_graph=args.cuda_graph,
             sparsity=args.sparsity,
         )
+        print(f"[INFO] TPOT: {ms:.4f} ms, min: {min_ms:.4f} ms, max: {max_ms:.4f} ms")
+        print(f"[INFO] Throughput: {(token_num / ms) * 1000.0:.4f} tokens/sec, min: {(token_num / max_ms) * 1000.0:.4f} tokens/sec, max: {(token_num / min_ms) * 1000.0:.4f} tokens/sec")
 
 if __name__ == "__main__":
     main()

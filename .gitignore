@@ -8,3 +8,4 @@ profile_result
 *.ncu-rep
 *.log
 /build
+/profiler_logs

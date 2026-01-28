@@ -26,7 +26,8 @@ class QuerySparsePrefill:
     support_kernel = [
         'ragged',
         'dense',
-        'sort',
+        'sort_offline',
+        'sort_online',
     ]
 
     @classmethod
@@ -333,7 +334,7 @@ class QuerySparsePrefill:
         return out
     
     @classmethod    
-    def _sort_kernel(
+    def _sort_offline_kernel(
         cls,
         q: torch.Tensor,
         k: torch.Tensor,
@@ -376,9 +377,7 @@ class QuerySparsePrefill:
             qk_scale *= 1.44269504 # 1/log(2)
             key_head_id = query_head_id // G
 
-            skip_flag = tl.load(
-                route_mask + batch_id * BLOCK_NUM + query_id,
-            )
+            skip_flag = tl.load(route_mask + batch_id * BLOCK_NUM + query_id)
             if skip_flag > 0:
                 query_batch_offset = batch_id * LQ * HQ * D
                 query_head_offset = query_head_id * D
@@ -458,6 +457,129 @@ class QuerySparsePrefill:
         )
         return out
     
+    @classmethod    
+    def _sort_online_kernel(
+        cls,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        route_mask: torch.Tensor,
+        pad_offset: Optional[torch.Tensor]=None,
+        BLOCK_M: Optional[int]=64,
+        BLOCK_N: Optional[int]=32,
+        num_stages: Optional[int]=3,
+        num_warps: Optional[int]=4,
+        do_not_specialize: Optional[List]=['LQ', 'LK', 'qk_scale'],
+        **kwargs
+    ):
+        @triton.jit(do_not_specialize=do_not_specialize)
+        def attention(
+            q: tl.tensor,
+            k: tl.tensor,
+            v: tl.tensor,
+            route_mask: tl.tensor, # [B, LQ]
+            route_indices: tl.tensor, # [B, LQ]
+            pad_offset: tl.tensor, # [B]
+            out: tl.tensor,
+            LQ: tl.int64,
+            LK: tl.int64,
+            HQ: tl.constexpr,
+            HK: tl.constexpr,
+            D: tl.constexpr,
+            G: tl.constexpr,
+            qk_scale: tl.float32,
+            BLOCK_M: tl.constexpr,
+            BLOCK_N: tl.constexpr,
+        ):
+            query_id, query_head_id, batch_id = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+
+            score_max = tl.full([BLOCK_M], -float('inf'), dtype=tl.float32)
+            score_sum = tl.zeros([BLOCK_M], dtype=tl.float32)
+            acc = tl.zeros([BLOCK_M, D], dtype=tl.float32)
+
+            qk_scale *= 1.44269504 # 1/log(2)
+            key_head_id = query_head_id // G
+
+            query_mask = tl.load(
+                route_mask + batch_id * LQ + query_id * BLOCK_M + tl.arange(0, BLOCK_M),
+                mask=query_id * BLOCK_M + tl.arange(0, BLOCK_M) < LQ,
+                other=0,
+            )
+            skip_flag = tl.reduce_or(query_mask, axis=-1)
+            if skip_flag > 0:
+                query_batch_offset = batch_id * LQ * HQ * D
+                query_head_offset = query_head_id * D
+                key_batch_offset = batch_id * LK * HK * D
+                key_head_offset = key_head_id * D
+
+                pad_offset_kv = tl.load(pad_offset + batch_id)
+                key_length = LK - pad_offset_kv
+
+                query_range_mask = query_mask > 0
+                query_indices = tl.load(
+                    route_indices + batch_id * LQ + query_id * BLOCK_M + tl.arange(0, BLOCK_M),
+                    mask=query_range_mask,
+                    other=0,
+                )
+
+                query_data = tl.load(
+                    q + (query_batch_offset + query_indices[:, None] * HQ * D + query_head_offset + tl.arange(0, D)[None, :]),
+                )
+
+                max_pos_q = tl.max(query_indices)
+                num_kv_iter = tl.cdiv(max_pos_q - pad_offset_kv + 1, BLOCK_N)
+                for tile_kv in tl.range(0, num_kv_iter):
+                    key_range_mask = ((tile_kv * BLOCK_N + tl.arange(0, BLOCK_N)) < key_length)
+                    key_data = tl.load(
+                        k + (key_batch_offset + (tile_kv * BLOCK_N + pad_offset_kv + tl.arange(0, BLOCK_N))[:, None] * HK * D + key_head_offset + tl.arange(0, D)[None, :]),
+                        mask=key_range_mask[:, None],
+                        other=0.0,
+                    )
+                    value_data = tl.load(
+                        v + (key_batch_offset + (tile_kv * BLOCK_N + pad_offset_kv + tl.arange(0, BLOCK_N))[:, None] * HK * D + key_head_offset + tl.arange(0, D)[None, :]),
+                        mask=key_range_mask[:, None],
+                        other=0.0,
+                    )
+
+                    qk = tl.dot(query_data, key_data.T) * qk_scale
+
+                    # causal mask for each query pos
+                    causal_mask = query_indices[:, None] >= (tile_kv * BLOCK_N + pad_offset_kv + tl.arange(0, BLOCK_N))[None, :]
+                    qk = tl.where(causal_mask & (query_range_mask[:, None] & key_range_mask[None, :]), qk, -float('inf'))
+
+                    score_max_new = tl.maximum(score_max, tl.max(qk, 1))
+                    score_scale = tl.exp2(score_max - score_max_new)
+                    qk = tl.exp2(qk - score_max_new[:, None])
+                    score_sum = score_sum * score_scale + tl.sum(qk, 1)
+                    acc = acc * score_scale[:, None] + tl.dot(qk.to(q.dtype.element_ty), value_data)
+                    score_max = score_max_new
+
+                acc /= score_sum[:, None]
+                tl.store(
+                    out + (query_batch_offset + query_indices[:, None] * HQ * D + query_head_offset + tl.arange(0, D)[None, :]),
+                    acc.to(out.dtype.element_ty),
+                    mask=query_range_mask[:, None],
+                )
+        
+        B, LQ, HQ, D = q.shape
+        _, LK, HK, _ = k.shape
+        G = HQ // HK
+
+        m_sort, m_sort_indices = torch.sort(route_mask, descending=True, stable=False) # [B, LQ]
+
+        out = torch.zeros_like(q)
+        grid = lambda META: (triton.cdiv(LQ, BLOCK_M), HQ, B)
+        attention[grid](
+            q, k, v,
+            m_sort, m_sort_indices, pad_offset, out,
+            LQ, LK, HQ, HK, D, G, D**-0.5,
+            BLOCK_M=BLOCK_M,
+            BLOCK_N=BLOCK_N,
+            num_stages=num_stages,
+            num_warps=num_warps,
+        )
+        return out
+    
     @classmethod
     def kernel(
         cls,
@@ -493,7 +615,7 @@ class QuerySparsePrefill:
         num_stages = 2
         num_warps = 4
 
-        if impl == 'auto': impl = 'sort'
+        if impl == 'auto': impl = 'sort_online'
 
         estimated_sparsity = kwargs.pop('estimated_sparsity', 0)
         if route_mask is None:

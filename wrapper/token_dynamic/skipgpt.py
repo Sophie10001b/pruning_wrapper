@@ -10,6 +10,7 @@ from transformers.cache_utils import Cache
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from transformers.generation import GenerationMixin
 from transformers.generation.utils import GenerateOutput
+from torch.profiler import record_function
 
 from ops import __ATTENTION__, __MLP__, __ROUTER__, __KV_CACHE__, __APPROXIMATOR__
 from ops.utils import triton_rmsnorm, triton_rope_qk_align
@@ -384,19 +385,20 @@ class SkipGPTDecoderLayer(nn.Module):
         estimated_sparsity: Optional[float]=-1,
         **kwargs,
     ) -> Dict[str, torch.Tensor]:
-        pruning_kwargs = {}
-        for name in pruning_targets:
-            router_name = f'{name}_router'
-            if getattr(self, router_name, None) is not None:
-                route = getattr(self, router_name)(hidden_states)[0]
-                if name == 'layer':
-                    pruning_kwargs['attention'] = pruning_kwargs['ffn'] = route
-                else:
-                    pruning_kwargs[name] = route
-                
-        if estimated_sparsity > 0: # generated benchmarking mask
-            for key in pruning_kwargs.keys():
-                pruning_kwargs[key] = torch.rand_like(pruning_kwargs[key].float()) > estimated_sparsity
+        with record_function("**Router**"):
+            pruning_kwargs = {}
+            for name in pruning_targets:
+                router_name = f'{name}_router'
+                if getattr(self, router_name, None) is not None:
+                    route = getattr(self, router_name)(hidden_states)[0]
+                    if name == 'layer':
+                        pruning_kwargs['attention'] = pruning_kwargs['ffn'] = route
+                    else:
+                        pruning_kwargs[name] = route
+                    
+            if estimated_sparsity >= 0: # generated benchmarking mask
+                for key in pruning_kwargs.keys():
+                    pruning_kwargs[key] = torch.rand_like(pruning_kwargs[key].float()) > estimated_sparsity
 
         return pruning_kwargs
 
@@ -425,18 +427,19 @@ class SkipGPTDecoderLayer(nn.Module):
         # 2. attention
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
-        hidden_states = self.self_attn(
-            hidden_states,
-            attention_mask=attention_mask,
-            position_ids=position_ids,
-            past_key_values=past_key_values,
-            use_cache=use_cache,
-            cache_position=cache_position,
-            position_embeddings=position_embeddings,
-            pad_offset=pad_offset,
-            pruning_kwargs=pruning_kwargs if use_predefined_route else local_pruning_kwargs,
-            **kwargs,
-        )
+        with record_function("**Attention**"):
+            hidden_states = self.self_attn(
+                hidden_states,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                past_key_values=past_key_values,
+                use_cache=use_cache,
+                cache_position=cache_position,
+                position_embeddings=position_embeddings,
+                pad_offset=pad_offset,
+                pruning_kwargs=pruning_kwargs if use_predefined_route else local_pruning_kwargs,
+                **kwargs,
+            )
 
         hidden_states = hidden_states + residual
 
@@ -447,11 +450,12 @@ class SkipGPTDecoderLayer(nn.Module):
 
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = self.mlp(
-            hidden_states,
-            pruning_kwargs=pruning_kwargs if use_predefined_route else local_pruning_kwargs,
-            **kwargs,
-        )
+        with record_function("**FFN**"):
+            hidden_states = self.mlp(
+                hidden_states,
+                pruning_kwargs=pruning_kwargs if use_predefined_route else local_pruning_kwargs,
+                **kwargs,
+            )
         hidden_states = hidden_states + residual
         return hidden_states
 
@@ -522,7 +526,7 @@ class SkipGPTModel(SkipGPTPretrainedModel):
         
         hidden_states = inputs_embeds
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
-        pad_offset = hidden_states.shape[1] - attention_mask.sum(-1)
+        pad_offset = attention_mask.shape[1] - attention_mask.sum(-1)
 
         for i, decoder_layer in enumerate(self.layers[:self.config.num_hidden_layers]):
             hidden_states = decoder_layer(

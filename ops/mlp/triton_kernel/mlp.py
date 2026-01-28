@@ -26,7 +26,8 @@ class BMSparseMLP:
     support_kernel = [
         'dense',
         'indexing',
-        'sort',
+        'sort_online',
+        'sort_offline',
     ]
 
     @classmethod
@@ -58,7 +59,7 @@ class BMSparseMLP:
         return rearrange(res, '(b l) d -> b l d', b=x.shape[0])
 
     @classmethod
-    def _sort_kernel(
+    def _sort_offline_kernel(
         cls,
         x: torch.Tensor,
         route_mask: torch.Tensor,
@@ -147,17 +148,17 @@ class BMSparseMLP:
         K = D
 
         x_flat = x.reshape((M, D))
-        m_sort = kwargs.get('sorted_mask', None)
-        m_sort_indices = kwargs.get('sorted_indices', None)
+        m_sort_pad = kwargs.get('m_sorted_pad', None)
+        m_sort_indices = kwargs.get('m_sorted_indices', None)
 
-        if m_sort is None:
+        if m_sort_indices is None:
             m_flat = route_mask.flatten(0, 1)
             m_sort, m_sort_indices = torch.sort(m_flat, descending=True, stable=False)
         
-        # offline calculate skipping
-        m_sort_pad = torch.nn.functional.pad(m_sort, (0, BLOCK_M - M % BLOCK_M), value=0).reshape(-1, BLOCK_M)
-        m_sort_pad = m_sort_pad.any(dim=-1)
-        m_sort_indices = m_sort_indices.masked_fill(m_sort.logical_not(), -1)
+            # offline calculate skipping
+            m_sort_pad = torch.nn.functional.pad(m_sort, (0, BLOCK_M - M % BLOCK_M), value=0).reshape(-1, BLOCK_M)
+            m_sort_pad = m_sort_pad.any(dim=-1)
+            m_sort_indices = m_sort_indices.masked_fill(m_sort.logical_not(), -1)
 
         out = torch.zeros((M, N), dtype=x.dtype, device=x.device)
         grid = lambda META: (triton.cdiv(M, BLOCK_M), triton.cdiv(N, BLOCK_N))
@@ -173,7 +174,128 @@ class BMSparseMLP:
             num_stages=num_stages,
             num_warps=num_warps,
         )
-        return rearrange(out, '(B L) N -> B L N', B=B, N=N)
+        return rearrange(out, '(B L) N -> B L N', B=B, N=N), dict(
+            m_sort_pad=m_sort_pad,
+            m_sort_indices=m_sort_indices,
+        )
+    
+    @classmethod
+    def _sort_online_kernel(
+        cls,
+        x: torch.Tensor,
+        route_mask: torch.Tensor,
+        w: torch.Tensor,
+        b: Optional[torch.Tensor]=None,
+        BLOCK_M: Optional[int]=64,
+        BLOCK_N: Optional[int]=32,
+        BLOCK_K: Optional[int]=32,
+        GROUP_SIZE: Optional[int]=4,
+        num_stages: Optional[int]=3,
+        num_warps: Optional[int]=4,
+        do_not_specialize: Optional[List]=['M'],
+        **kwargs
+    ):  
+        @triton.jit(do_not_specialize=do_not_specialize)
+        def mlp(
+            x: tl.tensor, # [M, K]
+            route_mask: tl.tensor, # [M]
+            route_indices: tl.tensor, # [M]
+            w: tl.tensor, # [N, K]
+            b: tl.tensor,
+            out: tl.tensor,
+            M: tl.int64,
+            N: tl.constexpr,
+            K: tl.constexpr,
+            HAS_BIAS: tl.constexpr,
+            BLOCK_M: tl.constexpr,
+            BLOCK_N: tl.constexpr,
+            BLOCK_K: tl.constexpr,
+            GROUP_SIZE: tl.constexpr,
+        ):
+            tmid, tnid = tl.program_id(0), tl.program_id(1)
+            BLOCK_NUM_M, BLOCK_NUM_N = tl.num_programs(0), tl.num_programs(1)
+
+            # compute indices in groups
+            # Group 1: B[0:BN], B[BN:2BN], ... B[(G-1)*BN:G*BN] -> A[0:BM]
+            mid, nid = tl.swizzle2d(tmid, tnid, BLOCK_NUM_M, BLOCK_NUM_N, GROUP_SIZE)
+
+            acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+
+            query_mask = tl.load(
+                route_mask + mid * BLOCK_M + tl.arange(0, BLOCK_M),
+                mask=mid * BLOCK_M + tl.arange(0, BLOCK_M) < M,
+                other=0,
+            )
+            skip_flag = tl.reduce_or(query_mask, axis=-1)
+            if skip_flag > 0:
+                bm_mask = query_mask > 0
+                bm_indices = tl.load(
+                    route_indices + mid * BLOCK_M + tl.arange(0, BLOCK_M),
+                    mask=bm_mask,
+                    other=0,
+                )
+
+                bm_offset = bm_indices * K
+                bn_offset = nid * BLOCK_N + tl.arange(0, BLOCK_N)
+                bn_offset = tl.max_contiguous(tl.multiple_of(bn_offset, BLOCK_N), BLOCK_N)
+                bk_offset = tl.arange(0, BLOCK_K)[None, :]
+                for i in tl.range(0, tl.cdiv(K, BLOCK_K)):
+                    x_data = tl.load(
+                        x + bm_offset[:, None] + bk_offset,
+                        mask=bk_offset < K,
+                        other=0,
+                    )
+                    w_data = tl.load(
+                        w + bn_offset[:, None] * K + bk_offset,
+                        mask=bk_offset < K,
+                        other=0,
+                    )
+
+                    acc = tl.dot(x_data, w_data.T, acc=acc)
+
+                    bk_offset += BLOCK_K
+                
+                if HAS_BIAS:
+                    acc += (tl.load(b + bn_offset, mask=bn_offset < N, other=0).to(tl.float32))[None, :]
+                
+                tl.store(
+                    out + bm_indices[:, None] * N + bn_offset[None, :],
+                    acc.to(x.dtype.element_ty),
+                    mask=bm_mask[:, None] & (bn_offset < N)[None, :],
+                )
+
+        B, L, D = x.shape
+
+        M = B * L
+        N = w.shape[0]
+        K = D
+
+        x_flat = x.reshape((M, D))
+        m_sort = kwargs.get('m_sort', None)
+        m_sort_indices = kwargs.get('m_sorted_indices', None)
+
+        if m_sort_indices is None:
+            m_flat = route_mask.flatten(0, 1)
+            m_sort, m_sort_indices = torch.sort(m_flat, descending=True, stable=False)
+
+        out = torch.zeros((M, N), dtype=x.dtype, device=x.device)
+        grid = lambda META: (triton.cdiv(M, BLOCK_M), triton.cdiv(N, BLOCK_N))
+        mlp[grid](
+            x_flat, m_sort, m_sort_indices,
+            w, b, out,
+            M, N, K,
+            HAS_BIAS=b is not None,
+            BLOCK_M=BLOCK_M,
+            BLOCK_N=BLOCK_N,
+            BLOCK_K=BLOCK_K,
+            GROUP_SIZE=GROUP_SIZE,
+            num_stages=num_stages,
+            num_warps=num_warps,
+        )
+        return rearrange(out, '(B L) N -> B L N', B=B, N=N), dict(
+            m_sort=m_sort,
+            m_sort_indices=m_sort_indices,
+        )
     
     @classmethod
     def kernel(
@@ -219,9 +341,9 @@ class BMSparseMLP:
         
         if impl == 'auto': # auto dispatch
             if route_mask is None: impl = 'dense'
-            else: impl = 'sort'
+            else: impl = 'sort_online'
 
-        if impl == 'sort':
+        if impl in ['sort_offline', 'sort_online']:
             BLOCK_M = triton.next_power_of_2(int(M * estimated_sparsity))
             if BLOCK_M > int(M * estimated_sparsity): BLOCK_M = BLOCK_M >> 1
 

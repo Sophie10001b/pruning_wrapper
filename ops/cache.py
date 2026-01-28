@@ -113,7 +113,7 @@ class DynamicCacheSeqFirst(Cache):
         """
         Reduce the cache length to `fallback_length`.
         """
-        for i in range(self.layers):
+        for i in range(len(self.layers)):
             self.layers[i].crop(fallback_length)
 
     def to_legacy_cache(self) -> tuple[tuple[torch.Tensor, torch.Tensor]]:

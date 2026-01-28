@@ -40,6 +40,7 @@ def load_config_and_class(args: Namespace):
     dynamic = getattr(args, "dynamic", 'token_dynamic')
     style = getattr(args, "style", 'skipgpt')
     config_name = getattr(args, "config_name", style)
+    if config_name == "": config_name = style
 
     # Load all wrapper classes for the specified dynamic type
     _load_wrapper_classes(dynamic)
