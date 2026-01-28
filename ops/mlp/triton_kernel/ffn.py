@@ -558,7 +558,7 @@ class BMSparseGLUBMSparseMLP:
         
         if impl == 'auto': # auto dispatch
             if cc < 9 and dtype == torch.bfloat16: impl = 'reduce'
-            else: impl = 'atomic_online'
+            else: impl = 'atomic_offline'
 
         if impl in ['atomic_online', 'atomic_offline', 'reduce',]:
             BLOCK_M = triton.next_power_of_2(int(M * estimated_sparsity))

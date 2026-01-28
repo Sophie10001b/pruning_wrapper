@@ -33,7 +33,7 @@ def main():
     set_seed(args.seed)
 
     args.model_name = 'qwen3-4b'
-    args.model_path = '/root/autodl-tmp/modelscope_cache/qwen3_4b'
+    args.model_path = '/root/autodl-fs/modelscope_cache/llama3.1-8b'
 
     args.dynamic = 'token_dynamic'
     args.style = 'skipgpt'
@@ -51,7 +51,7 @@ def main():
     args.sparsity = 0.5
 
     args.batch_size = 16
-    args.seq_len = 2048
+    args.seq_len = 1024
 
     if args.liger_kernel:
         from liger_kernel.transformers import apply_liger_kernel_to_llama, apply_liger_kernel_to_qwen3, apply_liger_kernel_to_qwen2

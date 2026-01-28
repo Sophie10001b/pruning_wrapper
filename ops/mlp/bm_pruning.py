@@ -83,21 +83,7 @@ class BMSparseMLPKernel(_PruningMLPKernel):
                 **kwargs,
             )
         else: # glu + down_proj fuse
-            if impl != 'seperate':
-                res, meta = BMSparseGLUBMSparseMLP.kernel(
-                    x=x,
-                    route_mask=route_mask,
-                    wu=w_up,
-                    wg=w_gate,
-                    wd=w_down,
-                    bu=b_up,
-                    bg=b_gate,
-                    activation=activation,
-                    estimated_sparsity=estimated_sparsity,
-                    impl=impl,
-                    **kwargs,
-                )
-            else:
+            if impl == 'seperate_1':
                 res, meta = BMSparseGLU.kernel(
                     x=x,
                     route_mask=route_mask,
@@ -111,7 +97,7 @@ class BMSparseMLPKernel(_PruningMLPKernel):
                     **kwargs,
                 )
                 meta.update(**kwargs)
-                res, meta = BMSparseMLP.kernel(
+                res, _ = BMSparseMLP.kernel(
                     x=res,
                     route_mask=route_mask,
                     w=w_down,
@@ -119,8 +105,50 @@ class BMSparseMLPKernel(_PruningMLPKernel):
                     impl='auto',
                     **meta,
                 )
+            elif impl == 'seperate_2':
+                up, meta = BMSparseMLP.kernel(
+                    x=x,
+                    route_mask=route_mask,
+                    w=w_up,
+                    estimated_sparsity=estimated_sparsity,
+                    impl='auto',
+                    **kwargs,
+                )
+                meta.update(**kwargs)
+                gate, _ = BMSparseMLP.kernel(
+                    x=x,
+                    route_mask=route_mask,
+                    w=w_gate,
+                    activation=activation,
+                    estimated_sparsity=estimated_sparsity,
+                    impl='auto',
+                    **meta,
+                )
+                res = gate * up
+                res, _ = BMSparseMLP.kernel(
+                    x=res,
+                    route_mask=route_mask,
+                    w=w_down,
+                    estimated_sparsity=estimated_sparsity,
+                    impl='auto',
+                    **meta,
+                )
+            else:
+                res, meta = BMSparseGLUBMSparseMLP.kernel(
+                    x=x,
+                    route_mask=route_mask,
+                    wu=w_up,
+                    wg=w_gate,
+                    wd=w_down,
+                    bu=b_up,
+                    bg=b_gate,
+                    activation=activation,
+                    estimated_sparsity=estimated_sparsity,
+                    impl=impl,
+                    **kwargs,
+                )
 
-        return res, meta
+        return res
 
     @classmethod
     def base_decode(cls, **kwargs):

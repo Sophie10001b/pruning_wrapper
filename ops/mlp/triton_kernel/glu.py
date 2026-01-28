@@ -37,7 +37,6 @@ class BMSparseGLU:
         wg: torch.Tensor,
         bu: Optional[torch.Tensor]=None,
         bg: Optional[torch.Tensor]=None,
-        sorted_mask: Optional[torch.Tensor]=None,
         activation: Optional[str]='identity',
         BLOCK_M: Optional[int]=64,
         BLOCK_N: Optional[int]=32,
@@ -175,8 +174,11 @@ class BMSparseGLU:
         cls,
         x: torch.Tensor,
         route_mask: torch.Tensor,
-        w: torch.Tensor,
-        b: Optional[torch.Tensor]=None,
+        wu: torch.Tensor,
+        wg: torch.Tensor,
+        bu: Optional[torch.Tensor]=None,
+        bg: Optional[torch.Tensor]=None,
+        activation: Optional[str]='identity',
         BLOCK_M: Optional[int]=64,
         BLOCK_N: Optional[int]=32,
         BLOCK_K: Optional[int]=32,
@@ -185,19 +187,24 @@ class BMSparseGLU:
         num_warps: Optional[int]=4,
         do_not_specialize: Optional[List]=['M'],
         **kwargs
-    ):  
+    ):
+        
         @triton.jit(do_not_specialize=do_not_specialize)
-        def mlp(
+        def glu(
             x: tl.tensor, # [M, K]
             route_mask: tl.tensor, # [M]
             route_indices: tl.tensor, # [M]
-            w: tl.tensor, # [N, K]
-            b: tl.tensor,
+            wu: tl.tensor, # [N, K]
+            wg: tl.tensor,
+            bu: tl.tensor,
+            bg: tl.tensor,
             out: tl.tensor,
             M: tl.int64,
             N: tl.constexpr,
             K: tl.constexpr,
-            HAS_BIAS: tl.constexpr,
+            HAS_BIAS_UP: tl.constexpr,
+            HAS_BIAS_GATE: tl.constexpr,
+            ACTIVATION: tl.constexpr,
             BLOCK_M: tl.constexpr,
             BLOCK_N: tl.constexpr,
             BLOCK_K: tl.constexpr,
@@ -210,7 +217,8 @@ class BMSparseGLU:
             # Group 1: B[0:BN], B[BN:2BN], ... B[(G-1)*BN:G*BN] -> A[0:BM]
             mid, nid = tl.swizzle2d(tmid, tnid, BLOCK_NUM_M, BLOCK_NUM_N, GROUP_SIZE)
 
-            acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+            acc_up = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+            acc_gate = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
 
             query_mask = tl.load(
                 route_mask + mid * BLOCK_M + tl.arange(0, BLOCK_M),
@@ -226,39 +234,48 @@ class BMSparseGLU:
                     other=0,
                 )
 
-                bm_offset = bm_indices * K
                 bn_offset = nid * BLOCK_N + tl.arange(0, BLOCK_N)
-                bn_offset = tl.max_contiguous(tl.multiple_of(bn_offset, BLOCK_N), BLOCK_N)
-                bk_offset = tl.arange(0, BLOCK_K)[None, :]
                 for i in tl.range(0, tl.cdiv(K, BLOCK_K)):
                     x_data = tl.load(
-                        x + bm_offset[:, None] + bk_offset,
-                        mask=bk_offset < K,
+                        x + bm_indices[:, None] * K + (i * BLOCK_K + tl.arange(0, BLOCK_K))[None, :],
+                        mask=(i * BLOCK_K + tl.arange(0, BLOCK_K) < K)[None, :],
                         other=0,
                     )
-                    w_data = tl.load(
-                        w + bn_offset[:, None] * K + bk_offset,
-                        mask=bk_offset < K,
+                    wu_data = tl.load(
+                        wu + bn_offset[:, None] * K + (i * BLOCK_K + tl.arange(0, BLOCK_K))[None, :],
+                        mask=(i * BLOCK_K + tl.arange(0, BLOCK_K) < K)[None, :],
+                        other=0,
+                    )
+                    wg_data = tl.load(
+                        wg + bn_offset[:, None] * K + (i * BLOCK_K + tl.arange(0, BLOCK_K))[None, :],
+                        mask=(i * BLOCK_K + tl.arange(0, BLOCK_K) < K)[None, :],
                         other=0,
                     )
 
-                    acc = tl.dot(x_data, w_data.T, acc=acc)
-
-                    bk_offset += BLOCK_K
+                    acc_up = tl.dot(x_data, wu_data.T, acc=acc_up)
+                    acc_gate = tl.dot(x_data, wg_data.T, acc=acc_gate)
                 
-                if HAS_BIAS:
-                    acc += (tl.load(b + bn_offset, mask=bn_offset < N, other=0).to(tl.float32))[None, :]
+                if HAS_BIAS_GATE:
+                    acc_gate += (tl.load(bg + bn_offset, mask=bn_offset < N, other=0).to(tl.float32))[None, :]
+                if HAS_BIAS_UP:
+                    acc_up += (tl.load(bu + bn_offset, mask=bn_offset < N, other=0).to(tl.float32))[None, :]
                 
+                if ACTIVATION == 'silu':
+                    acc_gate *= tl.sigmoid(acc_gate)
+                elif ACTIVATION == 'relu':
+                    acc_gate = tl.maximum(acc_gate, 0.0)
+                
+                acc_up *= acc_gate
                 tl.store(
                     out + bm_indices[:, None] * N + bn_offset[None, :],
-                    acc.to(x.dtype.element_ty),
+                    acc_up.to(x.dtype.element_ty),
                     mask=bm_mask[:, None] & (bn_offset < N)[None, :],
                 )
 
         B, L, D = x.shape
 
         M = B * L
-        N = w.shape[0]
+        N = wu.shape[0]
         K = D
 
         x_flat = x.reshape((M, D))
@@ -276,11 +293,13 @@ class BMSparseGLU:
 
         out = torch.zeros((M, N), dtype=x.dtype, device=x.device)
         grid = lambda META: (triton.cdiv(M, BLOCK_M), triton.cdiv(N, BLOCK_N))
-        mlp[grid](
+        glu[grid](
             x_flat, m_sort_pad, m_sort_indices,
-            w, b, out,
+            wu, wg, bu, bg, out,
             M, N, K,
-            HAS_BIAS=b is not None,
+            HAS_BIAS_UP=bu is not None,
+            HAS_BIAS_GATE=bg is not None,
+            ACTIVATION=activation,
             BLOCK_M=BLOCK_M,
             BLOCK_N=BLOCK_N,
             BLOCK_K=BLOCK_K,
@@ -339,7 +358,7 @@ class BMSparseGLU:
             route_mask = torch.ones((B, L), dtype=torch.bool, device=device)
         
         if impl == 'auto': # auto dispatch
-            impl = 'sort_online'
+            impl = 'sort_offline'
 
         if impl in ['sort_offline', 'sort_online']:
             BLOCK_M = triton.next_power_of_2(int(M * estimated_sparsity))

@@ -341,7 +341,7 @@ class BMSparseMLP:
         
         if impl == 'auto': # auto dispatch
             if route_mask is None: impl = 'dense'
-            else: impl = 'sort_online'
+            else: impl = 'sort_offline'
 
         if impl in ['sort_offline', 'sort_online']:
             BLOCK_M = triton.next_power_of_2(int(M * estimated_sparsity))
