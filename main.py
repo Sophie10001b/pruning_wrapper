@@ -5,6 +5,7 @@ from transformers import set_seed
 
 from prologue import init_model
 from benchmark.profiler import ModelProfiler
+from utils import print_results
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Pruning Wrapper")
@@ -17,41 +18,21 @@ def parse_args():
     parser.add_argument("--device", type=str, default="cuda:0", help="Device")
 
     parser.add_argument("--benchmark_metric", type=str, default="ttft", help="Benchmark metric")
-    parser.add_argument("--batch_size", type=int, default=1, help="Batch size")
-    parser.add_argument("--seq_len", type=int, default=2048, help="Sequence length")
+    parser.add_argument("--batch_size", type=int, default=[1], nargs='+', help="Batch size")
+    parser.add_argument("--seq_len", type=int, default=[2048], nargs='+', help="Sequence length")
     parser.add_argument("--sparsity", type=float, default=0.5, help="Sparsity")
     parser.add_argument("--num_warmup", type=int, default=10, help="Number of warmup iterations")
     parser.add_argument("--num_repeat", type=int, default=500, help="Number of repeat iterations")
     parser.add_argument("--cuda_graph", action="store_true", help="Enable CUDA graph")
     parser.add_argument("--liger_kernel", action="store_true", help="Enable Liger Kernel")
     parser.add_argument("--torch_profiler", action="store_true", help="Enable torch profiler")
+    parser.add_argument("--ncu_profiler", action="store_true", help="Enable ncu profiler")
 
     return parser.parse_args()
 
 def main():
     args = parse_args()
     set_seed(args.seed)
-
-    args.model_name = 'qwen3-4b'
-    args.model_path = '/root/autodl-fs/modelscope_cache/llama3.1-8b'
-
-    args.dynamic = 'token_dynamic'
-    args.style = 'skipgpt'
-    args.config_name = 'bm'
-
-    # args.dynamic = 'static'
-    # args.style = 'dense'
-    # args.config_name = 'dense'
-
-    args.liger_kernel = True
-    args.benchmark_metric = "tpot"
-    args.num_repeat = 100
-    args.torch_profiler = False
-    args.cuda_graph = True
-    args.sparsity = 0.5
-
-    args.batch_size = 16
-    args.seq_len = 1024
 
     if args.liger_kernel:
         from liger_kernel.transformers import apply_liger_kernel_to_llama, apply_liger_kernel_to_qwen3, apply_liger_kernel_to_qwen2
@@ -64,7 +45,7 @@ def main():
     dtype = torch.float16 if cc < 9 else torch.bfloat16
     print(f"[INFO] CUDA capability: {cc}, using dtype {dtype}")
 
-    model, tokenizer = init_model(args)
+    model, tokenizer, config_path = init_model(args)
     print("[INFO] Model initialize successfully:")
     print(model)
 
@@ -75,30 +56,41 @@ def main():
         dtype=dtype,
     )
 
-    if args.benchmark_metric == "ttft":
-        token_num = args.batch_size * args.seq_len
-        ms, min_ms, max_ms = profiler.profile_ttft(
-            batch_size=args.batch_size,
-            seq_len=args.seq_len,
-            warmup=args.num_warmup,
-            repeat=args.num_repeat,
-            cuda_graph=args.cuda_graph,
-            sparsity=args.sparsity,
-        )
-        print(f"[INFO] TTFT: {ms:.4f} ms, min: {min_ms:.4f} ms, max: {max_ms:.4f} ms")
-        print(f"[INFO] Throughput: {(token_num / ms) * 1000.0:.4f} tokens/sec, min: {(token_num / max_ms) * 1000.0:.4f} tokens/sec, max: {(token_num / min_ms) * 1000.0:.4f} tokens/sec")
-    elif args.benchmark_metric == "tpot":
-        token_num = args.batch_size
-        ms, min_ms, max_ms = profiler.profile_tpot(
-            batch_size=args.batch_size,
-            seq_len=args.seq_len,
-            warmup=args.num_warmup,
-            repeat=args.num_repeat,
-            cuda_graph=args.cuda_graph,
-            sparsity=args.sparsity,
-        )
-        print(f"[INFO] TPOT: {ms:.4f} ms, min: {min_ms:.4f} ms, max: {max_ms:.4f} ms")
-        print(f"[INFO] Throughput: {(token_num / ms) * 1000.0:.4f} tokens/sec, min: {(token_num / max_ms) * 1000.0:.4f} tokens/sec, max: {(token_num / min_ms) * 1000.0:.4f} tokens/sec")
+    if args.ncu_profiler:
+        if args.benchmark_metric == 'ttft': profiler.ncu_ttft(batch_size=args.batch_size[0], seq_len=args.seq_len[0])
+    else:
+        res_dict = {}
+        for batch_size in args.batch_size:
+            for seq_len in args.seq_len:
+                if args.benchmark_metric == "ttft":
+                    token_num = batch_size * seq_len
+                    ms, min_ms, max_ms = profiler.profile_ttft(
+                        batch_size=batch_size,
+                        seq_len=seq_len,
+                        warmup=args.num_warmup,
+                        repeat=args.num_repeat,
+                        cuda_graph=args.cuda_graph,
+                        sparsity=args.sparsity,
+                    )
+                    print(f"[INFO] TTFT: {ms:.4f} ms, min: {min_ms:.4f} ms, max: {max_ms:.4f} ms")
+                    print(f"[INFO] Throughput: {(token_num / ms) * 1000.0:.4f} tokens/sec, min: {(token_num / max_ms) * 1000.0:.4f} tokens/sec, max: {(token_num / min_ms) * 1000.0:.4f} tokens/sec")
+                elif args.benchmark_metric == "tpot":
+                    token_num = batch_size
+                    ms, min_ms, max_ms = profiler.profile_tpot(
+                        batch_size=batch_size,
+                        seq_len=seq_len,
+                        warmup=args.num_warmup,
+                        repeat=args.num_repeat,
+                        cuda_graph=args.cuda_graph,
+                        sparsity=args.sparsity,
+                    )
+                    print(f"[INFO] TPOT: {ms:.4f} ms, min: {min_ms:.4f} ms, max: {max_ms:.4f} ms")
+                    print(f"[INFO] Throughput: {(token_num / ms) * 1000.0:.4f} tokens/sec, min: {(token_num / max_ms) * 1000.0:.4f} tokens/sec, max: {(token_num / min_ms) * 1000.0:.4f} tokens/sec")
+                
+                res_dict[(batch_size, seq_len)] = [(token_num / ms) * 1000.0, (token_num / max_ms) * 1000.0, (token_num / min_ms) * 1000.0]
+        
+        print(f'[INFO] Model: {args.model_name}, Config: {config_path}, {args.benchmark_metric} results:')
+        print_results(res_dict)
 
 if __name__ == "__main__":
     main()

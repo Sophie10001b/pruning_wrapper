@@ -307,3 +307,40 @@ class ModelProfiler:
                     quantiles=kwargs.get('quantiles', [0.5, 0.2, 0.8]),
                     return_mode=kwargs.get('return_mode', 'mean'),
                 )
+
+    def ncu_ttft(
+        self,
+        batch_size: int=1,
+        seq_len: int=2048,
+        **kwargs,
+    ):
+        """
+        Run single layer for ncu profiling
+        """
+        dummy_inputs = self._get_dummy_inputs(batch_size, seq_len)
+        layer = self.model.model.layers[0]
+
+        hidden_states = self.model.model.embed_tokens(dummy_inputs)
+        attention_mask=torch.ones_like(dummy_inputs, dtype=torch.bool)
+
+        cache_position: torch.Tensor = torch.arange(hidden_states.shape[1], device=hidden_states.device)
+        position_ids = cache_position.unsqueeze(0)
+        position_embeddings = self.model.model.rotary_emb(hidden_states, position_ids)
+        pad_offset = attention_mask.shape[1] - attention_mask.sum(-1)
+
+        pruning_kwargs = layer.generate_pruning_kwargs(hidden_states=hidden_states, estimated_sparsity=kwargs.get('sparsity', 0.0))
+
+        model_inputs_kwargs = dict(
+            hidden_states=hidden_states,
+            attention_mask=attention_mask,
+            use_cache=True,
+            past_key_values=None,
+            position_ids=position_ids,
+            cache_position=cache_position,
+            position_embeddings=position_embeddings,
+            pad_offset=pad_offset,
+            pruning_kwargs=pruning_kwargs,
+            estimated_sparsity=kwargs.get('sparsity', 0.0),
+        )
+        
+        layer(**model_inputs_kwargs)

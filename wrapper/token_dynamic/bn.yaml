@@ -57,11 +57,11 @@ attention:
 
 # [base, bm, bn, bk]
 ffn:
-  block_size: 128
+  block_size: 32
   estimated_sparsity: 0.5
   pruning_type: bn
   backend: triton
-  prefill_impl: auto
+  prefill_impl: seperate_2
   decode_impl: auto
 
   router:

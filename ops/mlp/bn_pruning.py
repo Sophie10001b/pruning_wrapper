@@ -61,7 +61,7 @@ class BNSparseMLPKernel(_PruningMLPKernel):
         """
 
         if (w_down is None) and (w_gate is None): # single mlp layer
-            res = BNSparseMLP.kernel(
+            res, meta = BNSparseMLP.kernel(
                 x=x,
                 route_mask=route_mask,
                 w=w_up,
@@ -71,7 +71,7 @@ class BNSparseMLPKernel(_PruningMLPKernel):
                 **kwargs,
             )
         elif w_down is None: # glu
-            res = BNSparseGLU.kernel(
+            res, meta = BNSparseGLU.kernel(
                 x=x,
                 route_mask=route_mask,
                 wu=w_up,
@@ -84,8 +84,58 @@ class BNSparseMLPKernel(_PruningMLPKernel):
                 **kwargs,
             )
         else: # glu + down_proj fuse
-            if impl != 'seperate':
-                res = BNSparseGLUBKSparseMLP.kernel(
+            if impl == 'seperate_1':
+                res, meta = BNSparseGLU.kernel(
+                    x=x,
+                    route_mask=route_mask,
+                    wu=w_up,
+                    wg=w_gate,
+                    bu=b_up,
+                    bg=b_gate,
+                    activation=activation,
+                    estimated_sparsity=estimated_sparsity,
+                    impl='auto',
+                    **kwargs,
+                )
+                meta.update(**kwargs)
+                res, _ = BKSparseMLP.kernel(
+                    x=res,
+                    route_mask=route_mask,
+                    w=w_down,
+                    estimated_sparsity=estimated_sparsity,
+                    impl='auto',
+                    **meta,
+                )
+            elif impl == 'seperate_2':
+                up, meta = BNSparseMLP.kernel(
+                    x=x,
+                    route_mask=route_mask,
+                    w=w_up,
+                    estimated_sparsity=estimated_sparsity,
+                    impl='auto',
+                    **kwargs,
+                )
+                meta.update(**kwargs)
+                gate, _ = BNSparseMLP.kernel(
+                    x=x,
+                    route_mask=route_mask,
+                    w=w_gate,
+                    activation=activation,
+                    estimated_sparsity=estimated_sparsity,
+                    impl='auto',
+                    **meta,
+                )
+                res = gate * up
+                res, _ = BKSparseMLP.kernel(
+                    x=res,
+                    route_mask=route_mask,
+                    w=w_down,
+                    estimated_sparsity=estimated_sparsity,
+                    impl='auto',
+                    **meta,
+                )
+            else:
+                res, meta = BNSparseGLUBKSparseMLP.kernel(
                     x=x,
                     route_mask=route_mask,
                     wu=w_up,
@@ -96,27 +146,6 @@ class BNSparseMLPKernel(_PruningMLPKernel):
                     activation=activation,
                     estimated_sparsity=estimated_sparsity,
                     impl=impl,
-                    **kwargs,
-                )
-            else:
-                res = BNSparseGLU.kernel(
-                    x=x,
-                    route_mask=route_mask,
-                    wu=w_up,
-                    wg=w_gate,
-                    bu=b_up,
-                    bg=b_gate,
-                    activation=activation,
-                    estimated_sparsity=estimated_sparsity,
-                    impl='auto',
-                    **kwargs,
-                )
-                res = BKSparseMLP.kernel(
-                    x=res,
-                    route_mask=route_mask,
-                    w=w_down,
-                    estimated_sparsity=estimated_sparsity,
-                    impl='auto',
                     **kwargs,
                 )
 

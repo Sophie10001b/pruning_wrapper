@@ -61,7 +61,7 @@ ffn:
   estimated_sparsity: 0.5
   pruning_type: bm
   backend: triton
-  prefill_impl: seperate_2
+  prefill_impl: auto
   decode_impl: auto
 
   router:

@@ -58,7 +58,7 @@ def load_config_and_class(args: Namespace):
     # Get wrapper class
     wrapper_cls = get_wrapper_class(dynamic, style)
     
-    return config, wrapper_cls
+    return config, wrapper_cls, config_path
 
 def _load_wrapper_classes(dynamic: str):
     """

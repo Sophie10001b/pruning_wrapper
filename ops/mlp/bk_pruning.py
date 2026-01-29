@@ -51,7 +51,7 @@ class BKSparseMLPKernel(_PruningMLPKernel):
             out: torch.Tensor with shape same as x
         """
 
-        res = BKSparseMLP.kernel(
+        res, meta = BKSparseMLP.kernel(
             x=x,
             route_mask=route_mask,
             w=w_up,

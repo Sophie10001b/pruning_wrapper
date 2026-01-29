@@ -25,7 +25,7 @@ def init_model(args: Namespace) -> Dict:
     config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
 
     # apply wrapper
-    wrapper_config, wrapper_cls = load_config_and_class(args)
+    wrapper_config, wrapper_cls, config_path = load_config_and_class(args)
     model = wrapper_cls(
         config=config,
         pruning_config=wrapper_config,
@@ -34,4 +34,4 @@ def init_model(args: Namespace) -> Dict:
 
     model.post_load()
     
-    return model, tokenizer
+    return model, tokenizer, config_path

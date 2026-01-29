@@ -401,11 +401,12 @@ class BMSparseGLU:
 class BNSparseGLU:
 
     support_kernel = [
-        'sort',
+        'sort_offline',
+        'sort_online',
     ]
     
     @classmethod
-    def _sort_kernel(
+    def _sort_offline_kernel(
         cls,
         x: torch.Tensor,
         route_mask: torch.Tensor,
@@ -522,12 +523,16 @@ class BNSparseGLU:
         G = N // NG
 
         x_flat = x.reshape((M, D))
-        m_trans_flat = route_mask.flatten(0, 1).transpose(0, 1).contiguous() # [B, L, NG] -> [NG, M]
-        m_sort, m_sort_indices = torch.sort(m_trans_flat, dim=-1, descending=True, stable=False)
-        # offline calculate skipping
-        m_sort_pad = torch.nn.functional.pad(m_sort, (0, BLOCK_M - M % BLOCK_M), value=0).reshape(NG, -1, BLOCK_M)
-        m_sort_pad = m_sort_pad.any(dim=-1)
-        m_sort_indices = m_sort_indices.masked_fill(m_sort.logical_not(), -1)
+        m_sort_pad = kwargs.get('m_sort_pad', None)
+        m_sort_indices = kwargs.get('m_sort_indices', None)
+
+        if m_sort_indices is None:
+            m_trans_flat = route_mask.flatten(0, 1).transpose(0, 1).contiguous() # [B, L, NG] -> [NG, M]
+            m_sort, m_sort_indices = torch.sort(m_trans_flat, dim=-1, descending=True, stable=False)
+            # offline calculate skipping
+            m_sort_pad = torch.nn.functional.pad(m_sort, (0, BLOCK_M - M % BLOCK_M), value=0).reshape(NG, -1, BLOCK_M)
+            m_sort_pad = m_sort_pad.any(dim=-1)
+            m_sort_indices = m_sort_indices.masked_fill(m_sort.logical_not(), -1)
 
         out = torch.zeros((M, N), dtype=x.dtype, device=x.device)
         grid = lambda META: (triton.cdiv(M, BLOCK_M), NG, G_iter)
@@ -546,7 +551,159 @@ class BNSparseGLU:
             num_stages=num_stages,
             num_warps=num_warps,
         )
-        return rearrange(out, '(B L) N -> B L N', B=B)
+        return rearrange(out, '(B L) N -> B L N', B=B), dict(
+            m_sort_pad=m_sort_pad,
+            m_sort_indices=m_sort_indices,
+        )
+    
+    @classmethod
+    def _sort_online_kernel(
+        cls,
+        x: torch.Tensor,
+        route_mask: torch.Tensor,
+        wu: torch.Tensor,
+        wg: torch.Tensor,
+        bu: Optional[torch.Tensor]=None,
+        bg: Optional[torch.Tensor]=None,
+        activation: Optional[str]='identity',
+        BLOCK_M: Optional[int]=64,
+        BLOCK_N: Optional[int]=32,
+        BLOCK_K: Optional[int]=32,
+        G_iter: Optional[int]=1,
+        GROUP_SIZE: Optional[int]=4,
+        num_stages: Optional[int]=3,
+        num_warps: Optional[int]=4,
+        do_not_specialize: Optional[List]=['M'],
+        **kwargs
+    ):
+        
+        @triton.jit(do_not_specialize=do_not_specialize)
+        def glu(
+            x: tl.tensor, # [M, K]
+            route_mask: tl.tensor, # [NG, M]
+            route_indices: tl.tensor, # [NG, M]
+            wu: tl.tensor, # [N, K]
+            wg: tl.tensor,
+            bu: tl.tensor,
+            bg: tl.tensor,
+            out: tl.tensor,
+            M: tl.int64,
+            N: tl.constexpr,
+            K: tl.constexpr,
+            G_iter: tl.constexpr,
+            HAS_BIAS_UP: tl.constexpr,
+            HAS_BIAS_GATE: tl.constexpr,
+            ACTIVATION: tl.constexpr,
+            BLOCK_M: tl.constexpr,
+            BLOCK_N: tl.constexpr,
+            BLOCK_K: tl.constexpr,
+            GROUP_SIZE: tl.constexpr,
+        ):
+            tmid, tnid, gid = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+            BLOCK_NUM_M, BLOCK_NUM_N = tl.num_programs(0), tl.num_programs(1)
+
+            # compute indices in groups
+            # Group 1: B[0:BN], B[BN:2BN], ... B[(G-1)*BN:G*BN] -> A[0:BM]
+            mid, nid = tl.swizzle2d(tmid, tnid, BLOCK_NUM_M, BLOCK_NUM_N, GROUP_SIZE)
+
+            acc_up = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+            acc_gate = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+
+            query_mask = tl.load(
+                route_indices + nid * M + mid * BLOCK_M + tl.arange(0, BLOCK_M),
+                mask=mid * BLOCK_M + tl.arange(0, BLOCK_M) < M,
+                other=0,
+            )
+            skip_flag = tl.reduce_or(query_mask, axis=-1)
+            if skip_flag > 0:
+                bm_mask = query_mask > 0
+                bm_indices = tl.load(
+                    route_indices + nid * M + mid * BLOCK_M + tl.arange(0, BLOCK_M),
+                    mask=bm_mask,
+                    other=0,
+                )
+
+                bm_offset = bm_indices * K
+                bn_offset = (nid * G_iter + gid) * BLOCK_N + tl.arange(0, BLOCK_N)
+                bn_offset = tl.max_contiguous(tl.multiple_of(bn_offset, BLOCK_N), BLOCK_N)
+
+                bk_offset = tl.arange(0, BLOCK_K)[None, :]
+                for i in tl.range(0, tl.cdiv(K, BLOCK_K)):
+                    x_data = tl.load(
+                        x + bm_offset[:, None] + bk_offset,
+                        mask=bk_offset < K,
+                        other=0,
+                    )
+                    wu_data = tl.load(
+                        wu + bn_offset[:, None] * K + bk_offset,
+                        mask=bk_offset < K,
+                        other=0,
+                    )
+                    wg_data = tl.load(
+                        wg + bn_offset[:, None] * K + bk_offset,
+                        mask=bk_offset < K,
+                        other=0,
+                    )
+
+                    acc_up = tl.dot(x_data, wu_data.T, acc=acc_up)
+                    acc_gate = tl.dot(x_data, wg_data.T, acc=acc_gate)
+
+                    bk_offset += BLOCK_K
+                
+                if HAS_BIAS_GATE:
+                    acc_gate += (tl.load(bg + bn_offset, mask=bn_offset < N, other=0).to(tl.float32))[None, :]
+                if HAS_BIAS_UP:
+                    acc_up += (tl.load(bu + bn_offset, mask=bn_offset < N, other=0).to(tl.float32))[None, :]
+                
+                if ACTIVATION == 'silu':
+                    acc_gate *= tl.sigmoid(acc_gate)
+                elif ACTIVATION == 'relu':
+                    acc_gate = tl.maximum(acc_gate, 0.0)
+                
+                acc_up *= acc_gate
+                tl.store(
+                    out + bm_indices[:, None] * N + bn_offset[None, :],
+                    acc_up.to(x.dtype.element_ty),
+                    mask=bm_mask[:, None],
+                )
+
+        B, L, D = x.shape
+        _, _, NG = route_mask.shape
+
+        M = B * L
+        N = wu.shape[0]
+        K = D
+        G = N // NG
+
+        x_flat = x.reshape((M, D))
+        m_sort = kwargs.get('m_sort', None)
+        m_sort_indices = kwargs.get('m_sort_indices', None)
+
+        if m_sort_indices is None:
+            m_trans_flat = route_mask.flatten(0, 1).transpose(0, 1).contiguous() # [B, L, NG] -> [NG, M]
+            m_sort, m_sort_indices = torch.sort(m_trans_flat, dim=-1, descending=True, stable=False)
+
+        out = torch.zeros((M, N), dtype=x.dtype, device=x.device)
+        grid = lambda META: (triton.cdiv(M, BLOCK_M), NG, G_iter)
+        glu[grid](
+            x_flat, m_sort, m_sort_indices,
+            wu, wg, bu, bg, out,
+            M, N, K,
+            HAS_BIAS_UP=bu is not None,
+            HAS_BIAS_GATE=bg is not None,
+            ACTIVATION=activation,
+            BLOCK_M=BLOCK_M,
+            BLOCK_N=BLOCK_N,
+            BLOCK_K=BLOCK_K,
+            G_iter=G_iter,
+            GROUP_SIZE=GROUP_SIZE,
+            num_stages=num_stages,
+            num_warps=num_warps,
+        )
+        return rearrange(out, '(B L) N -> B L N', B=B), dict(
+            m_sort=m_sort,
+            m_sort_indices=m_sort_indices,
+        )
     
     @classmethod
     def kernel(
@@ -594,7 +751,7 @@ class BNSparseGLU:
             route_mask = torch.ones((B, L, NG), dtype=torch.bool, device=device)
         
         if impl == 'auto': # auto dispatch
-            impl = 'sort'
+            impl = 'sort_offline'
         
         NG = route_mask.shape[-1]
         G = N // NG
@@ -603,7 +760,7 @@ class BNSparseGLU:
         while BLOCK_N > 64: BLOCK_N = BLOCK_N >> 1
         G_iter = G // BLOCK_N
 
-        if impl in ['sort']:
+        if impl in ['sort_online', 'sort_offline']:
             BLOCK_M = triton.next_power_of_2(int(M * estimated_sparsity))
             if BLOCK_M > int(M * estimated_sparsity): BLOCK_M = BLOCK_M >> 1
 
