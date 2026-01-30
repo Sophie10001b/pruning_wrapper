@@ -1,16 +1,16 @@
-model_name=llama3-8.1b
+model_name=llama3.1-8b
 model_path=/root/autodl-fs/modelscope_cache/llama3.1-8b
 
-dynamic=token_dynamic
-style=skipgpt
-config_name=bn
+dynamic=static
+style=dense
+config_name=dense
 
-benchmark_metric=ttft
+benchmark_metric=tpot
 num_repeat=20
 sparsity=0.5
 
-batch_size=(4 8)
-seq_len=(2048)
+batch_size=(256)
+seq_len=(64)
 
 python main.py \
     --model_name $model_name \

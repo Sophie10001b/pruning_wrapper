@@ -574,7 +574,7 @@ class BNSparseMLP:
             acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
 
             query_mask = tl.load(
-                route_indices + nid * M + mid * BLOCK_M + tl.arange(0, BLOCK_M),
+                route_mask + nid * M + mid * BLOCK_M + tl.arange(0, BLOCK_M),
                 mask=mid * BLOCK_M + tl.arange(0, BLOCK_M) < M,
                 other=0,
             )
@@ -926,7 +926,7 @@ class BKSparseMLP:
             acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
 
             query_mask = tl.load(
-                route_indices + gid * M + mid * BLOCK_M + tl.arange(0, BLOCK_M),
+                route_mask + gid * M + mid * BLOCK_M + tl.arange(0, BLOCK_M),
                 mask=mid * BLOCK_M + tl.arange(0, BLOCK_M) < M,
                 other=0,
             )

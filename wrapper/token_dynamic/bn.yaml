@@ -31,7 +31,7 @@ attention:
     estimated_sparsity: 0.5
     pruning_type: null
     backend: triton
-    prefill_impl: auto
+    prefill_impl: sort_online
     decode_impl: auto
   
   k_proj:
@@ -52,16 +52,16 @@ attention:
     estimated_sparsity: 0.5
     pruning_type: null
     backend: triton
-    prefill_impl: auto
+    prefill_impl: atomic_online
     decode_impl: auto
 
 # [base, bm, bn, bk]
 ffn:
-  block_size: 32
+  block_size: 128
   estimated_sparsity: 0.5
   pruning_type: bn
   backend: triton
-  prefill_impl: seperate_2
+  prefill_impl: atomic_online
   decode_impl: auto
 
   router:
