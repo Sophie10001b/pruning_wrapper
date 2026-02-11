@@ -1,0 +1,42 @@
+cache_type: base
+
+attention:
+  estimated_sparsity: 0.5
+  
+  q_proj:
+    estimated_sparsity: 0.5
+    pruning_type: semi_structured
+    pruning_pattern: 2:4
+  
+  k_proj:
+    estimated_sparsity: 0.5
+    pruning_type: semi_structured
+    pruning_pattern: 2:4
+  
+  v_proj:
+    estimated_sparsity: 0.5
+    pruning_type: semi_structured
+    pruning_pattern: 2:4
+  
+  o_proj:
+    estimated_sparsity: 0.5
+    pruning_type: semi_structured
+    pruning_pattern: 2:4
+
+ffn:
+  estimated_sparsity: 0.5
+
+  up_proj:
+    estimated_sparsity: 0.5
+    pruning_type: semi_structured
+    pruning_pattern: 2:4
+  
+  gate_proj:
+    estimated_sparsity: 0.5
+    pruning_type: semi_structured
+    pruning_pattern: 2:4
+  
+  down_proj:
+    estimated_sparsity: 0.5
+    pruning_type: semi_structured
+    pruning_pattern: 2:4

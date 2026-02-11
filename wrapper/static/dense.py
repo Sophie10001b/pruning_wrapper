@@ -16,7 +16,7 @@ from ops import __ATTENTION__, __MLP__, __ROUTER__, __KV_CACHE__, __APPROXIMATOR
 from ops.utils import triton_rmsnorm, triton_rope_qk_align
 from wrapper.base import PrunedModelForCausalLM
 
-#################### FFN ####################
+#################### ATTN ####################
 class DenseAttention(nn.Module):
     """
     HF style attention with FA2

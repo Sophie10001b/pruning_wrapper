@@ -4,6 +4,8 @@ from .utils import triton_rmsnorm, triton_rope_qk_align
 from .router import LinearRouter, BottleneckRouter
 from .approximator import BottleneckApproximator
 
+from .mask import BaseMask, UnstructuredMask, SemiStructuredMask
+
 from .attention.base import DenseAttentionKernel
 from .attention.query_pruning import QuerySparseAttentionKernel
 from .attention.query_head_group_pruning import GroupSparseAttentionKernel
@@ -39,6 +41,12 @@ __APPROXIMATOR__ = {
 
 __KV_CACHE__ = {
     "base": DynamicCacheSeqFirst,
+}
+
+__MASK__ = {
+    "base": BaseMask,
+    "unstructured": UnstructuredMask,
+    "semi_structured": SemiStructuredMask,
 }
 
 __ATTENTION__ = {
