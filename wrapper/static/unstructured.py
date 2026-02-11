@@ -51,18 +51,22 @@ class UnstructuredDecoderLayer(DenseDecoderLayer):
                 prefix, suffix = name.split('.')
                 settings = getattr(self, f'{suffix}_kwargs')
                 pruning_type = settings.get('pruning_type', 'base')
-                pruning_pattern = settings.get('pruning_pattern', None)
+                block_size = settings.get('block_size', None)
 
-                component: nn.Linear = getattr(getattr(self.block, prefix), suffix)
+                if prefix == 'attention': prefix = 'self_attn'
+                elif prefix == 'ffn': prefix = 'mlp'
+                component: nn.Linear = getattr(getattr(self, prefix), suffix)
 
                 mask = __MASK__[pruning_type].random_sample(
                     shape=component.weight.shape,
                     sparsity=estimated_sparsity if estimated_sparsity > 0 else settings.get('estimated_sparsity', 0),
                     device=component.weight.device,
-                    pattern=pruning_pattern,
+                    block_size=block_size,
                 )
                 __MASK__[pruning_type].monkey_patch(component, mask)
                 pruning_kwargs[name] = mask
+        
+        return {}
 
 class UnstructuredPretrainedModel(PreTrainedModel):
     config: PretrainedConfig
@@ -166,6 +170,8 @@ class UnstructuredForCausalLM(PrunedModelForCausalLM):
         pruning_kwargs = {}
         for i in range(self.config.num_hidden_layers):
             pruning_kwargs[f'layer_{i}'] = self.model.layers[i].generate_pruning_kwargs(**kwargs)
+        
+        return {}
     
     def post_load(
         self,

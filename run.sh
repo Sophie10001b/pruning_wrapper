@@ -2,15 +2,15 @@ model_name=llama3.1-8b
 model_path=/root/autodl-fs/modelscope_cache/llama3.1-8b
 
 dynamic=static
-style=dense
-config_name=dense
+style=unstructured
+config_name=unstructured
 
-benchmark_metric=tpot
+benchmark_metric=ttft
 num_repeat=20
 sparsity=0.5
 
-batch_size=(256)
-seq_len=(64)
+batch_size=(8)
+seq_len=(1024)
 
 python main.py \
     --model_name $model_name \
