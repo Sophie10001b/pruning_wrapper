@@ -6,6 +6,8 @@ from .approximator import BottleneckApproximator
 
 from .mask import BaseMask, UnstructuredMask, SemiStructuredMask
 
+from .index import BaseIndex, StructuredIndex
+
 from .attention.base import DenseAttentionKernel
 from .attention.query_pruning import QuerySparseAttentionKernel
 from .attention.query_head_group_pruning import GroupSparseAttentionKernel
@@ -47,6 +49,11 @@ __MASK__ = {
     "base": BaseMask,
     "unstructured": UnstructuredMask,
     "semi_structured": SemiStructuredMask,
+}
+
+__INDEX__ = {
+    "base": BaseIndex,
+    "structured": StructuredIndex,
 }
 
 __ATTENTION__ = {

@@ -1,0 +1,41 @@
+cache_type: base
+
+layer:
+  estimated_sparsity: 0.5
+  pruning_type: bm
+
+attention:
+  estimated_sparsity: 0.5
+  pruning_type: bm
+
+  q_proj:
+    estimated_sparsity: 0.5
+    pruning_type: bk
+  
+  k_proj:
+    estimated_sparsity: 0.5
+    pruning_type: bk
+  
+  v_proj:
+    estimated_sparsity: 0.5
+    pruning_type: bk
+  
+  o_proj:
+    estimated_sparsity: 0.5
+    pruning_type: bn
+
+ffn:
+  estimated_sparsity: 0.5
+  pruning_type: bm
+
+  up_proj:
+    estimated_sparsity: 0.5
+    pruning_type: bk
+  
+  gate_proj:
+    estimated_sparsity: 0.5
+    pruning_type: bk
+  
+  down_proj:
+    estimated_sparsity: 0.5
+    pruning_type: bn
