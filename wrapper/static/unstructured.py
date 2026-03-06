@@ -162,7 +162,7 @@ class UnstructuredForCausalLM(PrunedModelForCausalLM):
         block: PreTrainedModel,
         **kwargs,
     ):
-        super().__init__(config, block, **kwargs)
+        super().__init__(config, pruning_config, block, **kwargs)
         self.model = UnstructuredModel(config, pruning_config, block.model, **kwargs)
     
     # Generate random route mask for benchmark

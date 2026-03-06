@@ -14,10 +14,52 @@ from torch.profiler import record_function
 
 from ops import __ATTENTION__, __MLP__, __ROUTER__, __KV_CACHE__, __APPROXIMATOR__
 from ops.utils import triton_rmsnorm, triton_rope_qk_align
-from wrapper.base import PrunedModelForCausalLM
+from wrapper.base import PrunedMLP, PrunedAttention, PrunedDecoderLayer, PrunedModelForCausalLM
+
+#################### FFN ####################
+class DenseMLP(PrunedMLP):
+    """
+    HF style FFN
+    """
+    def __init__(
+        self,
+        config: PretrainedConfig,
+        pruning_config: Dict[str, Any],
+        block: nn.Module,
+        post_attention_layernorm: nn.Module,
+        **kwargs,
+    ):
+        super().__init__(config, pruning_config, block, **kwargs)
+        self._support_pruning_components = []
+        self.mlp_impl = __MLP__['base']()
+
+        self.post_attention_layernorm = post_attention_layernorm
+    
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        **kwargs,
+    ) -> torch.Tensor:
+        residual = hidden_states
+        hidden_states = self.post_attention_layernorm(hidden_states)
+
+        glu_output = self.mlp_impl(
+            hidden_states,
+            w_up=self.up_proj.weight,
+            w_gate=self.gate_proj.weight,
+            b_up=self.up_proj.bias,
+            b_gate=self.gate_proj.bias,
+            activation=self.activation,
+        )
+        ffn_output = self.mlp_impl(
+            glu_output,
+            w_up=self.down_proj.weight,
+            b_down=self.down_proj.bias,
+        )
+        return ffn_output + residual
 
 #################### ATTN ####################
-class DenseAttention(nn.Module):
+class DenseAttention(PrunedAttention):
     """
     HF style attention with FA2
     """
@@ -26,28 +68,14 @@ class DenseAttention(nn.Module):
         config: PretrainedConfig,
         pruning_config: Dict[str, Any],
         block: nn.Module,
+        input_layernorm: nn.Module,
         **kwargs,
     ):
-        super().__init__()
+        super().__init__(config, pruning_config, block, **kwargs)
         self._support_pruning_components = []
-        self.config = config
-        self.pruning_config = pruning_config
-        self.layer_idx = block.layer_idx
-        self.head_dim = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
-        self.num_key_value_groups = config.num_attention_heads // config.num_key_value_heads
-        self.scaling = self.head_dim**-0.5
-        self.attention_dropout = config.attention_dropout
-        self.is_causal = True
-
-        self.q_proj = block.q_proj
-        self.k_proj = block.k_proj
-        self.v_proj = block.v_proj
-        self.o_proj = block.o_proj
-
-        self.q_norm = getattr(block, "q_norm", None)
-        self.k_norm = getattr(block, "k_norm", None)
-
         self.attention_impl = __ATTENTION__['base']()
+
+        self.input_layernorm = input_layernorm
     
     def forward(
         self,
@@ -59,6 +87,9 @@ class DenseAttention(nn.Module):
         pad_offset: Optional[torch.Tensor]=None,
         **kwargs,
     ) -> torch.Tensor:
+        residual = hidden_states
+        hidden_states = self.input_layernorm(hidden_states)
+
         q = self.q_proj(hidden_states)
         k = self.k_proj(hidden_states)
         v = self.v_proj(hidden_states)
@@ -83,11 +114,11 @@ class DenseAttention(nn.Module):
         attn_output = rearrange(attn_output, '... h d -> ... (h d)')
         attn_output = self.o_proj(attn_output)
 
-        return attn_output
+        return attn_output + residual
 
 
 #################### Layer ####################
-class DenseDecoderLayer(nn.Module):
+class DenseDecoderLayer(PrunedDecoderLayer):
     """
     HF style decoder layer
     """
@@ -99,23 +130,11 @@ class DenseDecoderLayer(nn.Module):
         layer_idx: int,
         **kwargs,
     ):
-        super().__init__()
+        super().__init__(config, pruning_config, block, layer_idx, **kwargs)
         self._support_pruning_components = []
-        self.config = config
-        self.pruning_config = pruning_config
-        self.layer_idx = layer_idx
-        self.input_layernorm = block.input_layernorm
-        self.post_attention_layernorm = block.post_attention_layernorm
-
-        self.hidden_size = config.hidden_size
-        self.intermediate_size = config.intermediate_size
-        self.num_attention_heads = config.num_attention_heads
-        self.num_key_value_heads = config.num_key_value_heads
-        self.num_key_value_groups = self.num_attention_heads // self.num_key_value_heads
-        self.head_dim = config.hidden_size // self.num_attention_heads
         
-        self.self_attn = DenseAttention(config, pruning_config, block.self_attn, **kwargs)
-        self.mlp = block.mlp
+        self.self_attn = DenseAttention(config, pruning_config, block.self_attn, block.input_layernorm, **kwargs)
+        self.mlp = DenseMLP(config, pruning_config, block.mlp, block.post_attention_layernorm, **kwargs)
     
     def generate_pruning_kwargs(
         self,
@@ -135,8 +154,6 @@ class DenseDecoderLayer(nn.Module):
         pad_offset: Optional[torch.Tensor]=None,
         **kwargs,
     ):
-        residual = hidden_states
-        hidden_states = self.input_layernorm(hidden_states)
         with record_function("**Attention**"):
             hidden_states = self.self_attn(
                 hidden_states,
@@ -150,13 +167,8 @@ class DenseDecoderLayer(nn.Module):
                 **kwargs,
             )
 
-        hidden_states = hidden_states + residual
-
-        residual = hidden_states
-        hidden_states = self.post_attention_layernorm(hidden_states)
         with record_function("**FFN**"):
             hidden_states = self.mlp(hidden_states)
-        hidden_states = hidden_states + residual
         return hidden_states
 
 class DensePretrainedModel(PreTrainedModel):
@@ -253,7 +265,7 @@ class DenseForCausalLM(PrunedModelForCausalLM):
         block: PreTrainedModel,
         **kwargs,
     ):
-        super().__init__(config, block, **kwargs)
+        super().__init__(config, pruning_config, block, **kwargs)
         self.model = DenseModel(config, pruning_config, block.model, **kwargs)
     
     # Generate random route mask for benchmark

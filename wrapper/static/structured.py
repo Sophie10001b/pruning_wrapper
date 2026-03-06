@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-from typing import Optional, Tuple, Dict, List, Union, Any
+from typing import Optional, Tuple, Dict, List, Union, Any, Sequence
 from einops import rearrange
 
 from transformers import PretrainedConfig
@@ -15,6 +15,28 @@ from torch.profiler import record_function
 from ops import __ATTENTION__, __MLP__, __ROUTER__, __KV_CACHE__, __APPROXIMATOR__, __INDEX__
 from ops.utils import triton_rmsnorm, triton_rope_qk_align
 from wrapper.base import PrunedModelForCausalLM
+from wrapper.static.dense import DenseAttention, DenseMLP, DenseDecoderLayer, DenseModel, DenseForCausalLM
+
+#################### Layer ####################
+class StructuredDecoderLayer(DenseDecoderLayer):
+    """
+    HF style decoder layer
+    """
+    def __init__(
+        self,
+        config: PretrainedConfig,
+        pruning_config: Dict[str, Any],
+        block: nn.Module,
+        layer_idx: int,
+        **kwargs,
+    ):
+        super().__init__(config, pruning_config, block, layer_idx, **kwargs)
+        self._propagate_group = tuple(
+            ("attention.q_proj", "attention.k_proj", "attention.v_proj"),
+            ("attention.o_proj"),
+            ("ffn.up_proj", "ffn.gate_proj"),
+            ("ffn.down_proj"),
+        )
 
 class StructuredPretrainedModel(PreTrainedModel):
     config: PretrainedConfig
@@ -111,39 +133,95 @@ class UnstructuredForCausalLM(PrunedModelForCausalLM):
         block: PreTrainedModel,
         **kwargs,
     ):
-        super().__init__(config, block, **kwargs)
-        self._support_pruning_components = ['layer', 'attention', 'ffn', 'attention.q_proj', 'attention.k_proj', 'attention.v_proj', 'attention.o_proj', 'ffn.up_proj', 'ffn.gate_proj', 'ffn.down_proj']
+        super().__init__(config, pruning_config, block, **kwargs)
+
+        # initialize pruning chain
+        self.pruning_chain = []
+        if pruning_config.get('prune_embedding', False): self.pruning_chain.append('model.embed_tokens')
+        for i, layer in enumerate(self.model.layers):
+            layer_chain = layer._propagate_group
+            self.pruning_chain.append([])
+            for group in layer_chain:
+                self.pruning_chain[-1].append(tuple([f'model.layers.{i}.{component}' for component in group]))
+        
+        if self.pruning_config.get('prune_lm_head', False): self.pruning_chain.append('lm_head')
+
         self.model = StructuredModel(config, pruning_config, block.model, **kwargs)
     
     # Generate random route mask for benchmark
     def generate_pruning_kwargs(self, **kwargs) -> Dict[str, torch.Tensor]:
         pruning_kwargs = {}
-        layer_skip_ids = set()
-        attention_skip_ids = set()
-        ffn_skip_ids = set()
+        attention_components = set(['attention.q_proj', 'attention.k_proj', 'attention.v_proj', 'attention.o_proj'])
+        ffn_components = set(['ffn.up_proj', 'ffn.gate_proj', 'ffn.down_proj'])
 
-        pruning_type = self.pruning_config.get('pruning_type', 'base')
-        for key in self._support_pruning_components:
-            pruning_config = self.pruning_config
-            for tgt in key.split('.'): pruning_config = pruning_config[tgt]
-            block_pruning_type = pruning_config.get('pruning_type', None)
+        patch_type = self.pruning_config.get('patch_type', 'structured')
 
-            if '.' not in key:
-                getattr(self, f'{key}_skip_ids') = set(__INDEX__[pruning_type].monkey_patch(
-                    root_model=self,
-                    target=key,
-                    sparsity=pruning_config.get('estimated_sparsity', 0),
-                ))
-            else:
-                for layer_id in range(len(self.model.layers)):
-                    if layer_id in layer_skip_ids: continue
-                    if ((layer_id in attention_skip_ids and (
-                                key in ('attention.q_proj', 'attention.k_proj', 'attention.v_proj', 'attention.o_proj')
-                            )
-                        ) or (
-                            layer_id < len(self.model.layers) - 1 and (layer_id + 1) in attention_skip_ids and (key == 'ffn.down_proj' and block_pruning_type == 'bn')
-                        )
-                    ): continue
+        # layer & sublayer first
+        layer_pruning_config = self.pruning_config.get('layer', {})
+        attention_pruning_config = self.pruning_config.get('attention', {})
+        ffn_pruning_config = self.pruning_config.get('ffn', {})
+
+        layer_skip_ids = []
+        if layer_pruning_config.get('pruning_type', None) is not None:
+            layer_skip_ids = set(__INDEX__[patch_type].monkey_patch_layer(
+                root_module=self,
+                sparsity=layer_pruning_config.get('estimated_sparsity', 0)
+            ))
+        
+        attention_skip_ids = []
+        if attention_pruning_config.get('pruning_type', None) is not None:
+            attention_skip_ids = set(__INDEX__[patch_type].monkey_patch_sublayer(
+                root_module=self,
+                target='attention',
+                sparsity=attention_pruning_config.get('estimated_sparsity', 0)
+            ))
+        
+        ffn_skip_ids = []
+        if ffn_pruning_config.get('pruning_type', None) is not None:
+            ffn_skip_ids = set(__INDEX__[patch_type].monkey_patch_sublayer(
+                root_module=self,
+                target='ffn',
+                sparsity=ffn_pruning_config.get('estimated_sparsity', 0)
+            ))
+        
+        # then for each layer's row & col
+        i = 0
+        while i < len(self.pruning_chain):
+            group = self.pruning_chain[i]
+            if not isinstance(group, Sequence): continue
+            layer_id = int(group[0].split('.')[2])
+
+            component = group[0]
+            if component in attention_components and layer_id in attention_skip_ids: continue
+            if component in ffn_components and layer_id in ffn_skip_ids: continue
+
+            prefix, suffix = component.split('.')
+            component_config = self.pruning_config.get(prefix, {}).get(suffix, {})
+            pruning_type = component_config.get('pruning_type', None)
+            src_targets = dst_targets = ()
+            if pruning_type == 'bn':
+                src_targets = group
+                dst_targets = self.pruning_chain[i+1] if i+1 < len(self.pruning_chain) else ()
+            elif pruning_type == 'bk':
+                src_targets = self.pruning_chain[0] if i == 1 and self.pruning_chain[0] == 'model.embed_tokens' else ()
+                dst_targets = group
+            else: continue
+            
+            is_multi_block = False
+            if len(src_targets) * len(dst_targets) > 0 or src_targets[0].split('.')[0] != dst_targets[0].split('.')[0]:
+                is_multi_block = True
+
+            component_skip_ids = set(__INDEX__[patch_type].monkey_patch_nk(
+                root_module=self,
+                src_targets=src_targets,
+                dst_targets=dst_targets,
+                sparsity=component_config.get('estimated_sparsity', 0),
+                is_multi_block=is_multi_block,
+                num_query_heads=self.config.num_attention_heads,
+                num_key_heads=self.config.num_key_value_heads,
+            ))
+
+            i += 2 if pruning_type == 'bn' else 1
         
         return {}
     
