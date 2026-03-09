@@ -158,7 +158,7 @@ class StructuredIndex(BaseIndex):
         num_key_value_heads: Optional[int]=0,
         **kwargs,
     ):
-        device = root_module.model.layers.self_attn.q_proj.weight.device
+        device = root_module.model.layers[0].self_attn.q_proj.weight.device
 
         if len(src_targets) > 0:
             start_module = get_module_recursive(root_module, src_targets[0])

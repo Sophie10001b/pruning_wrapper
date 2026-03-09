@@ -13,7 +13,6 @@ from transformers.generation.utils import GenerateOutput
 from torch.profiler import record_function
 
 from ops import __ATTENTION__, __MLP__, __ROUTER__, __KV_CACHE__, __APPROXIMATOR__, __INDEX__
-from ops.utils import triton_rmsnorm, triton_rope_qk_align
 from wrapper.base import PrunedModelForCausalLM
 from wrapper.static.dense import DenseAttention, DenseMLP, DenseDecoderLayer, DenseModel, DenseForCausalLM
 
@@ -31,12 +30,12 @@ class StructuredDecoderLayer(DenseDecoderLayer):
         **kwargs,
     ):
         super().__init__(config, pruning_config, block, layer_idx, **kwargs)
-        self._propagate_group = tuple(
-            ("attention.q_proj", "attention.k_proj", "attention.v_proj"),
-            ("attention.o_proj"),
-            ("ffn.up_proj", "ffn.gate_proj"),
-            ("ffn.down_proj"),
-        )
+        self._propagate_group = tuple([
+            ("attention.q_proj", "attention.k_proj", "attention.v_proj",),
+            ("attention.o_proj",),
+            ("ffn.up_proj", "ffn.gate_proj",),
+            ("ffn.down_proj",),
+        ])
 
 class StructuredPretrainedModel(PreTrainedModel):
     config: PretrainedConfig
@@ -134,19 +133,19 @@ class StructuredForCausalLM(PrunedModelForCausalLM):
         **kwargs,
     ):
         super().__init__(config, pruning_config, block, **kwargs)
+        self.model = StructuredModel(config, pruning_config, block.model, **kwargs)
 
         # initialize pruning chain
         self.pruning_chain = []
-        if pruning_config.get('prune_embedding', False): self.pruning_chain.append('model.embed_tokens')
+        if pruning_config.get('prune_embedding', False): self.pruning_chain.append(('model.embed_tokens',))
         for i, layer in enumerate(self.model.layers):
             layer_chain = layer._propagate_group
-            self.pruning_chain.append([])
+            real_chain = []
             for group in layer_chain:
-                self.pruning_chain[-1].append(tuple([f'model.layers.{i}.{component}' for component in group]))
+                real_chain.append(tuple([f'model.layers.{i}.{component}' for component in group]))
+            self.pruning_chain.extend(real_chain)
         
-        if self.pruning_config.get('prune_lm_head', False): self.pruning_chain.append('lm_head')
-
-        self.model = StructuredModel(config, pruning_config, block.model, **kwargs)
+        if self.pruning_config.get('prune_lm_head', False): self.pruning_chain.append(('lm_head',))
     
     # Generate random route mask for benchmark
     def generate_pruning_kwargs(self, **kwargs) -> Dict[str, torch.Tensor]:
