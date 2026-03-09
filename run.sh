@@ -2,8 +2,8 @@ model_name=llama3.1-8b
 model_path=/root/autodl-fs/modelscope_cache/llama3.1-8b
 
 dynamic=static
-style=unstructured
-config_name=unstructured
+style=structured
+config_name=structured
 
 benchmark_metric=ttft
 num_repeat=20

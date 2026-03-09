@@ -31,10 +31,10 @@ class StructuredDecoderLayer(DenseDecoderLayer):
     ):
         super().__init__(config, pruning_config, block, layer_idx, **kwargs)
         self._propagate_group = tuple([
-            ("attention.q_proj", "attention.k_proj", "attention.v_proj",),
-            ("attention.o_proj",),
-            ("ffn.up_proj", "ffn.gate_proj",),
-            ("ffn.down_proj",),
+            ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj",),
+            ("self_attn.o_proj",),
+            ("mlp.up_proj", "mlp.gate_proj",),
+            ("mlp.down_proj",),
         ])
 
 class StructuredPretrainedModel(PreTrainedModel):
@@ -150,8 +150,8 @@ class StructuredForCausalLM(PrunedModelForCausalLM):
     # Generate random route mask for benchmark
     def generate_pruning_kwargs(self, **kwargs) -> Dict[str, torch.Tensor]:
         pruning_kwargs = {}
-        attention_components = set(['attention.q_proj', 'attention.k_proj', 'attention.v_proj', 'attention.o_proj'])
-        ffn_components = set(['ffn.up_proj', 'ffn.gate_proj', 'ffn.down_proj'])
+        attention_components = set(['self_attn.q_proj', 'self_attn.k_proj', 'self_attn.v_proj', 'self_attn.o_proj'])
+        ffn_components = set(['mlp.up_proj', 'mlp.gate_proj', 'mlp.down_proj'])
 
         patch_type = self.pruning_config.get('patch_type', 'structured')
 
@@ -171,7 +171,7 @@ class StructuredForCausalLM(PrunedModelForCausalLM):
         if attention_pruning_config.get('pruning_type', None) is not None:
             attention_skip_ids = set(__INDEX__[patch_type].monkey_patch_sublayer(
                 root_module=self,
-                target='attention',
+                target='self_attn',
                 sparsity=attention_pruning_config.get('estimated_sparsity', 0)
             ))
         
@@ -179,7 +179,7 @@ class StructuredForCausalLM(PrunedModelForCausalLM):
         if ffn_pruning_config.get('pruning_type', None) is not None:
             ffn_skip_ids = set(__INDEX__[patch_type].monkey_patch_sublayer(
                 root_module=self,
-                target='ffn',
+                target='mlp',
                 sparsity=ffn_pruning_config.get('estimated_sparsity', 0)
             ))
         
@@ -194,7 +194,7 @@ class StructuredForCausalLM(PrunedModelForCausalLM):
             if component in attention_components and layer_id in attention_skip_ids: continue
             if component in ffn_components and layer_id in ffn_skip_ids: continue
 
-            prefix, suffix = component.split('.')
+            prefix, suffix = component.split('.')[-2:]
             component_config = self.pruning_config.get(prefix, {}).get(suffix, {})
             pruning_type = component_config.get('pruning_type', None)
             src_targets = dst_targets = ()
@@ -204,7 +204,9 @@ class StructuredForCausalLM(PrunedModelForCausalLM):
             elif pruning_type == 'bk':
                 src_targets = self.pruning_chain[0] if i == 1 and self.pruning_chain[0] == 'model.embed_tokens' else ()
                 dst_targets = group
-            else: continue
+            else:
+                i += 1
+                continue
 
             component_skip_ids = set(__INDEX__[patch_type].monkey_patch_nk(
                 root_module=self,

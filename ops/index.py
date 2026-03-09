@@ -67,6 +67,7 @@ class BaseIndex:
         if hasattr(tgt_module, '_leaf_modules'):
             for leaf_module in tgt_module._leaf_modules:
                 pruneable &= cls.check_if_pruneable(tgt_module, leaf_module, **kwargs)
+            return pruneable
         else:
             return True
     
@@ -140,7 +141,7 @@ class StructuredIndex(BaseIndex):
             indices = random.sample(candidate_indices, k=int(len(module) * sparsity))
         
         for layer_id in indices:
-            setattr(module[layer_id], target, lambda x: x[0])
+            setattr(getattr(module[layer_id], target), 'forward', lambda x: x[0])
             cls.mark_pruned(module[layer_id], 'M', target)
         
         if not isinstance(indices, torch.Tensor): indices = torch.tensor(indices, device=device)
