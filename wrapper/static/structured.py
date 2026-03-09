@@ -125,7 +125,7 @@ class StructuredModel(StructuredPretrainedModel):
         )
         
 
-class UnstructuredForCausalLM(PrunedModelForCausalLM):
+class StructuredForCausalLM(PrunedModelForCausalLM):
     def __init__(
         self,
         config: PretrainedConfig,
@@ -206,19 +206,14 @@ class UnstructuredForCausalLM(PrunedModelForCausalLM):
                 src_targets = self.pruning_chain[0] if i == 1 and self.pruning_chain[0] == 'model.embed_tokens' else ()
                 dst_targets = group
             else: continue
-            
-            is_multi_block = False
-            if len(src_targets) * len(dst_targets) > 0 or src_targets[0].split('.')[0] != dst_targets[0].split('.')[0]:
-                is_multi_block = True
 
             component_skip_ids = set(__INDEX__[patch_type].monkey_patch_nk(
                 root_module=self,
                 src_targets=src_targets,
                 dst_targets=dst_targets,
                 sparsity=component_config.get('estimated_sparsity', 0),
-                is_multi_block=is_multi_block,
                 num_query_heads=self.config.num_attention_heads,
-                num_key_heads=self.config.num_key_value_heads,
+                num_key_value_heads=self.config.num_key_value_heads,
             ))
 
             i += 2 if pruning_type == 'bn' else 1
