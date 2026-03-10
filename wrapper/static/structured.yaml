@@ -1,41 +1,52 @@
 cache_type: base
+prune_embedding: true
+prune_lm_head: true
 
 layer:
   estimated_sparsity: 0
   pruning_type: none
 
-attention:
-  estimated_sparsity: 0.25
+self_attn:
+  estimated_sparsity: 0.125
+  offset: 0.0
   pruning_type: bm
 
   q_proj:
-    estimated_sparsity: 0.25
-    pruning_type: bn
+    estimated_sparsity: 0.125
+    offset: 0.1
+    pruning_type: bk
   
   k_proj:
-    estimated_sparsity: 0.25
-    pruning_type: bn
+    estimated_sparsity: 0.125
+    offset: 0.1
+    pruning_type: bk
   
   v_proj:
-    estimated_sparsity: 0.25
-    pruning_type: bn
+    estimated_sparsity: 0.125
+    offset: 0.1
+    pruning_type: bk
   
   o_proj:
-    estimated_sparsity: 0.25
-    pruning_type: bk
+    estimated_sparsity: 0.125
+    offset: 0.1
+    pruning_type: bn
 
-ffn:
-  estimated_sparsity: 0.25
+mlp:
+  estimated_sparsity: 0.125
+  offset: 0.0
   pruning_type: bm
 
   up_proj:
-    estimated_sparsity: 0.25
-    pruning_type: bn
+    estimated_sparsity: 0.125
+    offset: 0.1
+    pruning_type: bk
   
   gate_proj:
-    estimated_sparsity: 0.25
-    pruning_type: bn
+    estimated_sparsity: 0.125
+    offset: 0.1
+    pruning_type: bk
   
   down_proj:
-    estimated_sparsity: 0.25
-    pruning_type: bk
+    estimated_sparsity: 0.125
+    offset: 0.1
+    pruning_type: bn

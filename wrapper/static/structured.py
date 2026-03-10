@@ -1,3 +1,4 @@
+import random
 import torch
 import torch.nn as nn
 
@@ -13,8 +14,123 @@ from transformers.generation.utils import GenerateOutput
 from torch.profiler import record_function
 
 from ops import __ATTENTION__, __MLP__, __ROUTER__, __KV_CACHE__, __APPROXIMATOR__, __INDEX__
+from ops.utils import triton_rmsnorm, triton_rope_qk_align
 from wrapper.base import PrunedModelForCausalLM
 from wrapper.static.dense import DenseAttention, DenseMLP, DenseDecoderLayer, DenseModel, DenseForCausalLM
+
+def generate_sparsity(pruning_config: Dict[str, Any]) -> float:
+    estimated_sparsity = pruning_config.get("estimated_sparsity", 0.0)
+    offset = pruning_config.get("offset", 0.0)
+    sampled_offset = random.uniform(-offset, offset)
+    return estimated_sparsity + sampled_offset
+
+#################### FFN ####################
+class StructuredMLP(DenseMLP):
+    """
+    HF style FFN
+    """
+    def __init__(
+        self,
+        config: PretrainedConfig,
+        pruning_config: Dict[str, Any],
+        block: nn.Module,
+        post_attention_layernorm: nn.Module,
+        **kwargs,
+    ):
+        super().__init__(config, pruning_config, block, post_attention_layernorm, **kwargs)
+
+    def _residual_mapping(self):
+        self.residual_map = nn.Identity()
+        if self.up_proj.in_features != self.down_proj.out_features:
+            self.residual_map = nn.Linear(
+                self.up_proj.in_features, self.down_proj.out_features,
+                bias=False, device=self.up_proj.weight.device, dtype=self.up_proj.weight.dtype
+            )
+    
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        **kwargs,
+    ) -> torch.Tensor:
+        residual = hidden_states
+        hidden_states = self.post_attention_layernorm(hidden_states)
+
+        glu_output = self.mlp_impl(
+            hidden_states,
+            w_up=self.up_proj.weight,
+            w_gate=self.gate_proj.weight,
+            b_up=self.up_proj.bias,
+            b_gate=self.gate_proj.bias,
+            activation=self.activation,
+        )
+        ffn_output = self.mlp_impl(
+            glu_output,
+            w_up=self.down_proj.weight,
+            b_down=self.down_proj.bias,
+        )
+        return ffn_output + self.residual_map(residual)
+
+#################### ATTN ####################
+class StructuredAttention(DenseAttention):
+    """
+    HF style attention with FA2
+    """
+    def __init__(
+        self,
+        config: PretrainedConfig,
+        pruning_config: Dict[str, Any],
+        block: nn.Module,
+        input_layernorm: nn.Module,
+        **kwargs,
+    ):
+        super().__init__(config, pruning_config, block, input_layernorm, **kwargs)
+    
+    def _residual_mapping(self):
+        self.residual_map = nn.Identity()
+        if self.q_proj.in_features != self.o_proj.out_features:
+            self.residual_map = nn.Linear(
+                self.q_proj.in_features, self.o_proj.out_features,
+                bias=False, device=self.q_proj.weight.device, dtype=self.q_proj.weight.dtype
+            )
+    
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor]=None,
+        attention_mask: Optional[torch.Tensor]=None,
+        past_key_values: Optional[Cache]=None,
+        cache_position: Optional[torch.LongTensor]=None,
+        pad_offset: Optional[torch.Tensor]=None,
+        **kwargs,
+    ) -> torch.Tensor:
+        residual = hidden_states
+        hidden_states = self.input_layernorm(hidden_states)
+
+        q = self.q_proj(hidden_states)
+        k = self.k_proj(hidden_states)
+        v = self.v_proj(hidden_states)
+
+        q, k, v = list(map(lambda x: rearrange(x, '... (h d) -> ... h d', d=self.head_dim), [q, k, v]))
+        if self.q_norm: q = self.q_norm(q)
+        if self.k_norm: k = self.k_norm(k)
+
+        cos, sin = position_embeddings
+        q, k = triton_rope_qk_align(q, k, cos, sin)
+
+        if past_key_values is not None:
+            # sin and cos are specific to RoPE models; cache_position needed for the static cache
+            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+            k, v = past_key_values.update(k, v, self.layer_idx, cache_kwargs)
+        
+        attn_output = self.attention_impl(
+            q, k, v,
+            attention_mask=attention_mask,
+            pad_offset=pad_offset,
+        )
+        attn_output = rearrange(attn_output, '... h d -> ... (h d)')
+        attn_output = self.o_proj(attn_output)
+
+        return attn_output + self.residual_map(residual)
 
 #################### Layer ####################
 class StructuredDecoderLayer(DenseDecoderLayer):
@@ -37,6 +153,9 @@ class StructuredDecoderLayer(DenseDecoderLayer):
             ("mlp.down_proj",),
         ])
 
+        self.self_attn = StructuredAttention(config, pruning_config, block.self_attn, block.input_layernorm, **kwargs)
+        self.mlp = StructuredMLP(config, pruning_config, block.mlp, block.post_attention_layernorm, **kwargs)
+
 class StructuredPretrainedModel(PreTrainedModel):
     config: PretrainedConfig
     base_model_prefix = "model"
@@ -51,7 +170,7 @@ class StructuredPretrainedModel(PreTrainedModel):
     _supports_attention_backend = False
     _can_record_outputs = {
         "hidden_states": StructuredDecoderLayer,
-        "attentions": DenseAttention,
+        "attentions": StructuredAttention,
     }
 
 class StructuredModel(StructuredPretrainedModel):
@@ -146,55 +265,82 @@ class StructuredForCausalLM(PrunedModelForCausalLM):
             self.pruning_chain.extend(real_chain)
         
         if self.pruning_config.get('prune_lm_head', False): self.pruning_chain.append(('lm_head',))
+
+        self.is_pruned = False
     
     # Generate random route mask for benchmark
     def generate_pruning_kwargs(self, **kwargs) -> Dict[str, torch.Tensor]:
-        pruning_kwargs = {}
-        attention_components = set(['self_attn.q_proj', 'self_attn.k_proj', 'self_attn.v_proj', 'self_attn.o_proj'])
-        ffn_components = set(['mlp.up_proj', 'mlp.gate_proj', 'mlp.down_proj'])
+        if self.is_pruned: return {}
 
         patch_type = self.pruning_config.get('patch_type', 'structured')
 
         # layer & sublayer first
         layer_pruning_config = self.pruning_config.get('layer', {})
-        attention_pruning_config = self.pruning_config.get('attention', {})
-        ffn_pruning_config = self.pruning_config.get('ffn', {})
+        attention_pruning_config = self.pruning_config.get('self_attn', {})
+        ffn_pruning_config = self.pruning_config.get('mlp', {})
 
-        layer_skip_ids = []
+        layer_skip_ids = set()
         if layer_pruning_config.get('pruning_type', None) is not None:
             layer_skip_ids = set(__INDEX__[patch_type].monkey_patch_layer(
                 root_module=self,
-                sparsity=layer_pruning_config.get('estimated_sparsity', 0)
+                sparsity=generate_sparsity(layer_pruning_config)
             ))
-        
-        attention_skip_ids = []
+
+        attention_skip_ids = set()
         if attention_pruning_config.get('pruning_type', None) is not None:
             attention_skip_ids = set(__INDEX__[patch_type].monkey_patch_sublayer(
                 root_module=self,
                 target='self_attn',
-                sparsity=attention_pruning_config.get('estimated_sparsity', 0)
+                sparsity=generate_sparsity(attention_pruning_config)
             ))
         
-        ffn_skip_ids = []
+        ffn_skip_ids = set()
         if ffn_pruning_config.get('pruning_type', None) is not None:
             ffn_skip_ids = set(__INDEX__[patch_type].monkey_patch_sublayer(
                 root_module=self,
                 target='mlp',
-                sparsity=ffn_pruning_config.get('estimated_sparsity', 0)
+                sparsity=generate_sparsity(ffn_pruning_config)
             ))
+        
+        deleted_layers = []
+        for layer_ids in layer_skip_ids:
+            chains = self.model.layers[layer_ids]._propagate_group
+            real_chain = []
+            for group in chains:
+                real_chain.append(tuple([f'model.layers.{layer_ids}.{component}' for component in group]))
+            deleted_layers.extend(real_chain)
+        
+        for layer_ids in attention_skip_ids:
+            chains = self.model.layers[layer_ids]._propagate_group[:2]
+            real_chain = []
+            for group in chains:
+                real_chain.append(tuple([f'model.layers.{layer_ids}.{component}' for component in group]))
+            deleted_layers.extend(real_chain)
+        
+        for layer_ids in ffn_skip_ids:
+            chains = self.model.layers[layer_ids]._propagate_group[2:]
+            real_chain = []
+            for group in chains:
+                real_chain.append(tuple([f'model.layers.{layer_ids}.{component}' for component in group]))
+            deleted_layers.extend(real_chain)
+        
+        # remove deleted layers
+        deleted_layers = set(deleted_layers)
+        self.pruning_chain = [group for group in self.pruning_chain if group not in deleted_layers]
         
         # then for each layer's row & col
         i = 0
         while i < len(self.pruning_chain):
             group = self.pruning_chain[i]
-            if not isinstance(group, Sequence): continue
-            layer_id = int(group[0].split('.')[2])
+
+            if not isinstance(group, Sequence): 
+                i += 1
+                continue
 
             component = group[0]
-            if component in attention_components and layer_id in attention_skip_ids: continue
-            if component in ffn_components and layer_id in ffn_skip_ids: continue
+            component_name = '.'.join(component.split('.')[-2:])
 
-            prefix, suffix = component.split('.')[-2:]
+            prefix, suffix = component_name.split('.') if len(component_name.split('.')) == 2 else ('', component_name)
             component_config = self.pruning_config.get(prefix, {}).get(suffix, {})
             pruning_type = component_config.get('pruning_type', None)
             src_targets = dst_targets = ()
@@ -202,7 +348,7 @@ class StructuredForCausalLM(PrunedModelForCausalLM):
                 src_targets = group
                 dst_targets = self.pruning_chain[i+1] if i+1 < len(self.pruning_chain) else ()
             elif pruning_type == 'bk':
-                src_targets = self.pruning_chain[0] if i == 1 and self.pruning_chain[0] == 'model.embed_tokens' else ()
+                src_targets = self.pruning_chain[0] if i == 1 and 'model.embed_tokens' in self.pruning_chain[0] else ()
                 dst_targets = group
             else:
                 i += 1
@@ -212,13 +358,20 @@ class StructuredForCausalLM(PrunedModelForCausalLM):
                 root_module=self,
                 src_targets=src_targets,
                 dst_targets=dst_targets,
-                sparsity=component_config.get('estimated_sparsity', 0),
+                sparsity=generate_sparsity(component_config),
                 num_query_heads=self.config.num_attention_heads,
                 num_key_value_heads=self.config.num_key_value_heads,
+                head_dim=self.config.hidden_size // self.config.num_attention_heads,
             ))
 
             i += 2 if pruning_type == 'bn' else 1
         
+        # epilogue
+        for layer in self.model.layers:
+            layer.self_attn._residual_mapping()
+            layer.mlp._residual_mapping()
+        
+        self.is_pruned = True
         return {}
     
     def post_load(

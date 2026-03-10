@@ -219,6 +219,9 @@ class ModelProfiler:
         device_cache = runtime.driver.active.get_empty_cache_for_benchmark()
 
         # get dummy kv cache
+        dummy_pruning_kwargs = self.model.generate_pruning_kwargs(**model_inputs_kwargs)
+        model_inputs_kwargs['pruning_kwargs'] = dummy_pruning_kwargs
+
         model_outputs: CausalLMOutputWithPast = self.model(**model_inputs_kwargs)
         model_inputs_kwargs['past_key_values'] = model_outputs.past_key_values
         model_inputs_kwargs['input_ids'] = dummy_inputs
