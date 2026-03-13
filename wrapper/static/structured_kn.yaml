@@ -1,7 +1,7 @@
 cache_type: base
 prune_embedding: true
 prune_lm_head: true
-residual_mapping: false
+residual_mapping: true
 
 layer:
   estimated_sparsity: 0

@@ -32,6 +32,7 @@ class UnstructuredDecoderLayer(DenseDecoderLayer):
     ):
         super().__init__(config, pruning_config, block, layer_idx, **kwargs)
         self._support_pruning_components = ['attention.q_proj', 'attention.k_proj', 'attention.v_proj', 'attention.o_proj', 'ffn.up_proj', 'ffn.gate_proj', 'ffn.down_proj']
+        self.is_pruned = False
 
         # pruning impl
         for key in self._support_pruning_components:
@@ -45,6 +46,7 @@ class UnstructuredDecoderLayer(DenseDecoderLayer):
         estimated_sparsity: Optional[float]=-1,
         **kwargs,
     ) -> Dict[str, torch.Tensor]:
+        if self.is_pruned: return {}
         with record_function("**Initialization**"):
             pruning_kwargs = {}
             for name in pruning_targets:
@@ -66,6 +68,8 @@ class UnstructuredDecoderLayer(DenseDecoderLayer):
                 __MASK__[pruning_type].monkey_patch(component, mask)
                 pruning_kwargs[name] = mask
         
+                self.is_pruned = True
+
         return {}
 
 class UnstructuredPretrainedModel(PreTrainedModel):

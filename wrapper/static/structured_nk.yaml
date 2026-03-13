@@ -1,6 +1,6 @@
 cache_type: base
-prune_embedding: true
-prune_lm_head: true
+prune_embedding: false
+prune_lm_head: false
 residual_mapping: false
 
 layer:
@@ -15,12 +15,12 @@ self_attn:
   q_proj:
     estimated_sparsity: 0.5
     offset: 0
-    pruning_type: K
+    pruning_type: N
   
   o_proj:
     estimated_sparsity: 0.5
     offset: 0
-    pruning_type: N
+    pruning_type: K
 
 mlp:
   estimated_sparsity: 0
@@ -30,9 +30,9 @@ mlp:
   up_proj:
     estimated_sparsity: 0.5
     offset: 0
-    pruning_type: K
+    pruning_type: N
   
   down_proj:
     estimated_sparsity: 0.5
     offset: 0
-    pruning_type: N
+    pruning_type: K

@@ -4,10 +4,12 @@ import torch
 import triton
 import triton.language as tl
 
-from typing import Optional, Tuple, Dict, Any
+from typing import Optional, List, Tuple, Dict, Any, Callable
 from einops import rearrange
 
 os.environ['TRITON_PRINT_AUTOTUNING']='0'
+
+_autotune_cache = {}
 
 def generate_autotune_config(tuning_dict: Dict):
     keys = list(tuning_dict.keys())
@@ -21,6 +23,69 @@ def generate_autotune_config(tuning_dict: Dict):
         combinations.append(triton.Config(combination_dict, num_stages=num_stages, num_warps=num_warps))
     
     return combinations
+
+# Wrapper for Autotune
+class AutotuneMixin:
+    @staticmethod
+    def generate_autotune_config(tuning_dict: Dict):
+        keys = list(tuning_dict.keys())
+        value_lists = [tuning_dict[key] for key in keys]
+        
+        combinations = []
+        for value_combination in itertools.product(*value_lists):
+            combination_dict = dict(zip(keys, value_combination))
+            num_stages = combination_dict.pop('num_stages', 3)
+            num_warps = combination_dict.pop('num_warps', 4)
+            combinations.append(triton.Config(combination_dict, num_stages=num_stages, num_warps=num_warps))
+        
+        return combinations
+    
+    @classmethod
+    def conditional_jit(
+        cls,
+        enable_autotune: bool,
+        config: Optional[List[triton.Config]]=[],
+        keys: Optional[List[str]]=[],
+        do_not_specialize: Optional[List[str]]=[],
+        **kwargs,
+    ):
+        def decorator(func):
+            if enable_autotune:
+                return triton.autotune(configs=config, key=keys)(
+                    triton.jit(func, do_not_specialize=do_not_specialize)
+                )
+            else:
+                return triton.jit(func, do_not_specialize=do_not_specialize)
+        return decorator
+
+# call cache
+def get_autotune_cache(
+    func: Callable,
+    enable_autotune,
+    config, keys,
+    do_not_specialize: Optional[List[str]]=[]
+):
+    """Get cached kernel to avoid recompilation"""
+    func_name = func.__name__
+    cache_key = (func_name, enable_autotune, tuple(config), tuple(keys), tuple(do_not_specialize))
+    if cache_key not in _autotune_cache:
+        _autotune_cache[cache_key] = AutotuneMixin.conditional_jit(
+            enable_autotune=enable_autotune,
+            config=list(config),
+            keys=keys,
+        )(func)
+    return _autotune_cache[cache_key]
+
+# extract autotune config
+def get_autotune_config(params: List[str], **kwargs) -> List[triton.Config]:
+    enable_autotune = kwargs.get('enable_autotune', False)
+    if enable_autotune:
+        tuning_dict = {param: kwargs.get(f'{param}_list', kwargs.get(param)) for param in params}
+    else:
+        tuning_dict = {param: kwargs.get(param) for param in params}
+    
+    return AutotuneMixin.generate_autotune_config(tuning_dict)
+
 
 @triton.autotune(
     configs=generate_autotune_config(
@@ -127,9 +192,22 @@ def triton_rope_qk_align(
     HK = k.shape[-2]
     G = HQ // HK
     M = q.shape[0] * q.shape[1]
-    grid = lambda META: (triton.cdiv(M, META['BLOCK_M']), HQ)
+    grid = lambda meta: (triton.cdiv(M, meta['BLOCK_M']), HQ)
     
-    triton_rope_qk_align_fwd[grid](
+    config = get_autotune_config(
+        params=['BLOCK_M'],
+        enable_autotune=True,
+        BLOCK_M=1,
+        BLOCK_M_list=[1, 2, 4, 8],
+    )
+    kernel = get_autotune_cache(
+        triton_rope_qk_align_fwd,
+        enable_autotune=True,
+        config=config,
+        keys=['HQ', 'HK', 'N'],
+        do_not_specialize=['B', 'L', 'M'],
+    )
+    kernel[grid](
         q, k,
         cos,
         sin,
@@ -217,8 +295,22 @@ def triton_rmsnorm(
     assert N == w.shape[0]
 
     out = torch.empty_like(x_flatten)
-    grid = lambda META: (triton.cdiv(M, META['BLOCK_M']),)
-    triton_rmsnorm_fwd[grid](
+    grid = lambda meta: (triton.cdiv(M, meta['BLOCK_M']),)
+
+    config = get_autotune_config(
+        params=['BLOCK_M'],
+        enable_autotune=True,
+        BLOCK_M=1,
+        BLOCK_M_list=[1, 2, 4, 8],
+    )
+    kernel = get_autotune_cache(
+        triton_rmsnorm_fwd,
+        enable_autotune=True,
+        config=config,
+        keys=['N', 'BLOCK_N'],
+        do_not_specialize=['M', 'eps'],
+    )
+    kernel[grid](
         x,
         out,
         w,

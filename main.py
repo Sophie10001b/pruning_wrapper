@@ -46,14 +46,14 @@ def main():
     print(f"[INFO] CUDA capability: {cc}, using dtype {dtype}")
 
     model, tokenizer, config_path = init_model(args)
-    print("[INFO] Model initialize successfully:")
-    print(model)
 
+    profiler_name = f"{args.benchmark_metric}_{args.batch_size[-1]}_{args.seq_len[-1]}_{args.dynamic}_{args.style}_{args.config_name}_{args.sparsity}_{args.cuda_graph}"
     profiler = ModelProfiler(
         model=model,
         tokenizer=tokenizer,
         args=args,
         dtype=dtype,
+        profiler_name=profiler_name,
     )
 
     if args.ncu_profiler:
@@ -62,32 +62,36 @@ def main():
         res_dict = {}
         for batch_size in args.batch_size:
             for seq_len in args.seq_len:
-                if args.benchmark_metric == "ttft":
-                    token_num = batch_size * seq_len
-                    ms, min_ms, max_ms = profiler.profile_ttft(
-                        batch_size=batch_size,
-                        seq_len=seq_len,
-                        warmup=args.num_warmup,
-                        repeat=args.num_repeat,
-                        cuda_graph=args.cuda_graph,
-                        sparsity=args.sparsity,
-                    )
-                    print(f"[INFO] TTFT: {ms:.4f} ms, min: {min_ms:.4f} ms, max: {max_ms:.4f} ms")
-                    print(f"[INFO] Throughput: {(token_num / ms) * 1000.0:.4f} tokens/sec, min: {(token_num / max_ms) * 1000.0:.4f} tokens/sec, max: {(token_num / min_ms) * 1000.0:.4f} tokens/sec")
-                elif args.benchmark_metric == "tpot":
-                    token_num = batch_size
-                    ms, min_ms, max_ms = profiler.profile_tpot(
-                        batch_size=batch_size,
-                        seq_len=seq_len,
-                        warmup=args.num_warmup,
-                        repeat=args.num_repeat,
-                        cuda_graph=args.cuda_graph,
-                        sparsity=args.sparsity,
-                    )
-                    print(f"[INFO] TPOT: {ms:.4f} ms, min: {min_ms:.4f} ms, max: {max_ms:.4f} ms")
-                    print(f"[INFO] Throughput: {(token_num / ms) * 1000.0:.4f} tokens/sec, min: {(token_num / max_ms) * 1000.0:.4f} tokens/sec, max: {(token_num / min_ms) * 1000.0:.4f} tokens/sec")
+                try:
+                    if args.benchmark_metric == "ttft":
+                        token_num = batch_size * seq_len
+                        ms, min_ms, max_ms = profiler.profile_ttft(
+                            batch_size=batch_size,
+                            seq_len=seq_len,
+                            warmup=args.num_warmup,
+                            repeat=args.num_repeat,
+                            cuda_graph=args.cuda_graph,
+                            sparsity=args.sparsity,
+                        )
+                        print(f"[INFO] TTFT: {ms:.4f} ms, min: {min_ms:.4f} ms, max: {max_ms:.4f} ms")
+                        print(f"[INFO] Throughput: {(token_num / ms) * 1000.0:.4f} tokens/sec, min: {(token_num / max_ms) * 1000.0:.4f} tokens/sec, max: {(token_num / min_ms) * 1000.0:.4f} tokens/sec")
+                    elif args.benchmark_metric == "tpot":
+                        token_num = batch_size
+                        ms, min_ms, max_ms = profiler.profile_tpot(
+                            batch_size=batch_size,
+                            seq_len=seq_len,
+                            warmup=args.num_warmup,
+                            repeat=args.num_repeat,
+                            cuda_graph=args.cuda_graph,
+                            sparsity=args.sparsity,
+                        )
+                        print(f"[INFO] TPOT: {ms:.4f} ms, min: {min_ms:.4f} ms, max: {max_ms:.4f} ms")
+                        print(f"[INFO] Throughput: {(token_num / ms) * 1000.0:.4f} tokens/sec, min: {(token_num / max_ms) * 1000.0:.4f} tokens/sec, max: {(token_num / min_ms) * 1000.0:.4f} tokens/sec")
                 
-                res_dict[(batch_size, seq_len)] = [(token_num / ms) * 1000.0, (token_num / max_ms) * 1000.0, (token_num / min_ms) * 1000.0]
+                    res_dict[(batch_size, seq_len)] = [(token_num / ms) * 1000.0, (token_num / max_ms) * 1000.0, (token_num / min_ms) * 1000.0]
+                except Exception as e:
+                    print(f"[ERROR] {e}")
+                    res_dict[(batch_size, seq_len)] = [0, 0, 0]
         
         print(f'[INFO] Model: {args.model_name}, Config: {config_path}, {args.benchmark_metric} results:')
         print_results(res_dict)

@@ -40,10 +40,11 @@ class ModelProfiler:
             self.profiler = torch.profiler.profile(
                 activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
                 schedule=torch.profiler.schedule(wait=1, warmup=1, active=3, repeat=1),
-                on_trace_ready=torch.profiler.tensorboard_trace_handler('./profiler_logs', use_gzip=True),
+                on_trace_ready=torch.profiler.tensorboard_trace_handler('./profiler_logs', worker_name=kwargs.get('profiler_name', None), use_gzip=True),
                 record_shapes=True,
                 profile_memory=True,
-                with_stack=True,
+                with_stack=False,
+                acc_events=True,
             )
     
     def _get_dummy_inputs(
@@ -118,6 +119,10 @@ class ModelProfiler:
             model_inputs_kwargs['pruning_kwargs'] = dummy_pruning_kwargs
             self.model(**model_inputs_kwargs)
         device_interface.synchronize()
+
+        print("[INFO] Model initialize successfully:")
+        print(self.model)
+        print(f"[INFO] Parameters: {sum(p.numel() for p in self.model.parameters())}")
     
         # 2. run profiler
         n_repeat = kwargs.get('repeat', 20)
@@ -135,8 +140,7 @@ class ModelProfiler:
                 runtime.driver.active.clear_cache(device_cache)
                 device_interface.synchronize()
                 start_events[i].record()
-                with record_function("**Model Prefill**"):
-                    self.model(**model_inputs_kwargs)
+                self.model(**model_inputs_kwargs)
                 if self.profiler is not None: self.profiler.step()
                 end_events[i].record()
                 device_interface.synchronize()
@@ -174,8 +178,7 @@ class ModelProfiler:
 
                     device_interface.synchronize()
                     start_events[i].record()
-                    with record_function("**Model Prefill**"):
-                        g.replay()
+                    g.replay()
                     if self.profiler is not None: self.profiler.step()
                     end_events[i].record()
                     device_interface.synchronize()
@@ -236,6 +239,10 @@ class ModelProfiler:
 
         device_interface.synchronize()
 
+        print("[INFO] Model initialize successfully:")
+        print(self.model)
+        print(f"[INFO] Parameters: {sum(p.numel() for p in self.model.parameters())}")
+
         # 2. run profiler
         n_repeat = kwargs.get('repeat', 20)
 
@@ -252,8 +259,7 @@ class ModelProfiler:
                 runtime.driver.active.clear_cache(device_cache)
                 device_interface.synchronize()
                 start_events[i].record()
-                with record_function("**Model Decode**"):
-                    self.model(**model_inputs_kwargs)
+                self.model(**model_inputs_kwargs)
                 if self.profiler is not None: self.profiler.step()
                 end_events[i].record()
                 device_interface.synchronize()
@@ -294,8 +300,7 @@ class ModelProfiler:
 
                     device_interface.synchronize()
                     start_events[i].record()
-                    with record_function("**Model Decode**"):
-                        g.replay()
+                    g.replay()
                     if self.profiler is not None: self.profiler.step()
                     end_events[i].record()
                     device_interface.synchronize()

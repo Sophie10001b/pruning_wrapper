@@ -154,10 +154,10 @@ class DenseDecoderLayer(PrunedDecoderLayer):
         pad_offset: Optional[torch.Tensor]=None,
         **kwargs,
     ):
-        with record_function("**Attention**"):
+        with record_function(f"Attention_{self.layer_idx}"):
             hidden_states = self.self_attn(
                 hidden_states,
-                attention_mask=attention_mask if not kwargs.get('use_cuda_graph', False) else None,
+                attention_mask=None,
                 position_ids=position_ids,
                 past_key_values=past_key_values,
                 use_cache=use_cache,
@@ -167,7 +167,7 @@ class DenseDecoderLayer(PrunedDecoderLayer):
                 **kwargs,
             )
 
-        with record_function("**FFN**"):
+        with record_function(f"FFN_{self.layer_idx}"):
             hidden_states = self.mlp(hidden_states)
         return hidden_states
 

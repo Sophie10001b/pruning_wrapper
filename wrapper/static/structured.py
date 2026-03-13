@@ -38,14 +38,15 @@ class StructuredMLP(DenseMLP):
         **kwargs,
     ):
         super().__init__(config, pruning_config, block, post_attention_layernorm, **kwargs)
+        self.residual_map = nn.Identity()
 
     def _residual_mapping(self):
-        self.residual_map = nn.Identity()
-        if self.up_proj.in_features != self.down_proj.out_features:
-            self.residual_map = nn.Linear(
-                self.up_proj.in_features, self.down_proj.out_features,
-                bias=False, device=self.up_proj.weight.device, dtype=self.up_proj.weight.dtype
-            )
+        # self.residual_map = nn.Identity()
+        # if self.up_proj.in_features != self.down_proj.out_features:
+        self.residual_map = nn.Linear(
+            self.up_proj.in_features, self.down_proj.out_features,
+            bias=False, device=self.up_proj.weight.device, dtype=self.up_proj.weight.dtype
+        )
     
     def forward(
         self,
@@ -84,14 +85,15 @@ class StructuredAttention(DenseAttention):
         **kwargs,
     ):
         super().__init__(config, pruning_config, block, input_layernorm, **kwargs)
+        self.residual_map = nn.Identity()
     
     def _residual_mapping(self):
-        self.residual_map = nn.Identity()
-        if self.q_proj.in_features != self.o_proj.out_features:
-            self.residual_map = nn.Linear(
-                self.q_proj.in_features, self.o_proj.out_features,
-                bias=False, device=self.q_proj.weight.device, dtype=self.q_proj.weight.dtype
-            )
+        # self.residual_map = nn.Identity()
+        # if self.q_proj.in_features != self.o_proj.out_features:
+        self.residual_map = nn.Linear(
+            self.q_proj.in_features, self.o_proj.out_features,
+            bias=False, device=self.q_proj.weight.device, dtype=self.q_proj.weight.dtype
+        )
     
     def forward(
         self,
@@ -280,14 +282,14 @@ class StructuredForCausalLM(PrunedModelForCausalLM):
         ffn_pruning_config = self.pruning_config.get('mlp', {})
 
         layer_skip_ids = set()
-        if layer_pruning_config.get('pruning_type', None) is not None:
+        if layer_pruning_config.get('pruning_type', None) == 'M':
             layer_skip_ids = set(__INDEX__[patch_type].monkey_patch_layer(
                 root_module=self,
                 sparsity=generate_sparsity(layer_pruning_config)
             ))
 
         attention_skip_ids = set()
-        if attention_pruning_config.get('pruning_type', None) is not None:
+        if attention_pruning_config.get('pruning_type', None) == 'M':
             attention_skip_ids = set(__INDEX__[patch_type].monkey_patch_sublayer(
                 root_module=self,
                 target='self_attn',
@@ -295,7 +297,7 @@ class StructuredForCausalLM(PrunedModelForCausalLM):
             ))
         
         ffn_skip_ids = set()
-        if ffn_pruning_config.get('pruning_type', None) is not None:
+        if ffn_pruning_config.get('pruning_type', None) == 'M':
             ffn_skip_ids = set(__INDEX__[patch_type].monkey_patch_sublayer(
                 root_module=self,
                 target='mlp',
@@ -344,10 +346,10 @@ class StructuredForCausalLM(PrunedModelForCausalLM):
             component_config = self.pruning_config.get(prefix, {}).get(suffix, {})
             pruning_type = component_config.get('pruning_type', None)
             src_targets = dst_targets = ()
-            if pruning_type == 'bn':
+            if pruning_type == 'N':
                 src_targets = group
                 dst_targets = self.pruning_chain[i+1] if i+1 < len(self.pruning_chain) else ()
-            elif pruning_type == 'bk':
+            elif pruning_type == 'K':
                 src_targets = self.pruning_chain[0] if i == 1 and 'model.embed_tokens' in self.pruning_chain[0] else ()
                 dst_targets = group
             else:
@@ -364,12 +366,13 @@ class StructuredForCausalLM(PrunedModelForCausalLM):
                 head_dim=self.config.hidden_size // self.config.num_attention_heads,
             ))
 
-            i += 2 if pruning_type == 'bn' else 1
+            i += 2 if pruning_type == 'N' else 1
         
         # epilogue
-        for layer in self.model.layers:
-            layer.self_attn._residual_mapping()
-            layer.mlp._residual_mapping()
+        if self.pruning_config.get('residual_mapping', False):
+            for layer in self.model.layers:
+                layer.self_attn._residual_mapping()
+                layer.mlp._residual_mapping()
         
         self.is_pruned = True
         return {}
