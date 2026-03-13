@@ -1,5 +1,307 @@
+import torch
 import triton
 import triton.experimental.gluon as gluon
 import triton.experimental.gluon.language as gl
 
+from typing import Optional, Tuple, Dict, List, Any
+from einops import rearrange
 from triton.experimental.gluon.nvidia.hopper import TensorDescriptor
+from triton.experimental.gluon.language.nvidia.ampere import (async_copy, mma_v2)
+from triton.experimental.gluon.language.nvidia.ampere import mbarrier as mbarrier_ampere
+from triton.experimental.gluon.language.nvidia.blackwell import (tma, mbarrier, fence_async_shared)
+
+from ops.utils import get_autotune_config, get_autotune_cache
+
+@gluon.jit
+def swizzle_l2(i, j, size_i, size_j, size_g):
+    # "unrolled index in array"
+    ij = i * size_j + j
+    # number of elements in `size_g` groups
+    # of `size_j` columns
+    size_gj = size_g * size_j
+    # index of the group in which (i,j) is
+    group_id = ij // size_gj
+    # row-index of the first element of this group
+    off_i = group_id * size_g
+    # last group may have fewer rows
+    size_g = gl.minimum(size_i - off_i, size_g)
+    # linear index with respect to the first element in this group
+    ij = ij % size_gj
+    # new row and column indices
+    new_i = off_i + ij % size_g
+    new_j = ij // size_g
+    return new_i, new_j
+
+@gluon.jit
+def issue_load_AB(
+    producer: gl.int32,
+    mA_desc: TensorDescriptor,
+    mB_desc: TensorDescriptor,
+    sA: gl.shared_memory_descriptor,
+    sB: gl.shared_memory_descriptor,
+    n_base: gl.constexpr,
+    k_offset: gl.int32,
+    mA_idx: gl.tensor,
+    bars: gl.shared_memory_descriptor,
+    BLOCK_M: gl.constexpr,
+    num_stages: gl.constexpr,
+    pred=True,
+):
+    index = producer % num_stages
+    producer += 1
+    bar = bars.index(index)
+
+    mbarrier.expect(bar, BLOCK_M * mA_desc.block_type.nbtyes + mB_desc.block_type.nbtyes)
+    tma.async_gather(
+        mA_desc, mA_idx, k_offset,
+        barrier=bar,
+        result=sA.index(index),
+        pred=pred,
+    )
+    tma.async_copy_global_to_shared(
+        mB_desc, [n_base, k_offset],
+        barrier=bar,
+        result=sB.index(index),
+        pred=pred,
+    )
+    return producer
+
+@gluon.jit
+def issue_mma(
+    consumer: gl.int32,
+    sA: gl.shared_memory_descriptor,
+    sB: gl.shared_memory_descriptor,
+    sD: gl.shared_memory_descriptor,
+    rA_layout: gl.DotOperandLayout,
+    rB_layout: gl.DotOperandLayout,
+    rD: gl.tensor,
+    bars: gl.shared_memory_descriptor,
+    BLOCK_M: gl.constexpr,
+    num_stages: gl.constexpr,
+):
+    index = consumer % num_stages
+    phase = consumer // num_stages & 1
+    consumer += 1
+    bar = bars.index(index)
+
+    mbarrier.wait(bar, phase)
+    # load shared to register
+    rA = sA.load(rA_layout)
+    rB = sB.load(rB_layout)
+
+    mma_v2(rA, rB.T, rD)
+    mbarrier.invalidate(bar)
+    return consumer
+
+# SM120 gather & scatter fuse gemm, with TMA gather4 load A, TMA load B, sm80 wmma run A@B, and
+# store to D (not support scatter4). Pipeline style is under sm80, without persist / WS trick.
+
+def bm_sort_sm120_impl(
+    mA_desc: TensorDescriptor,
+    mB_desc: TensorDescriptor,
+    mD: gl.tensor,
+    sD_layout: gl.NVMMASharedLayout,
+    route_mask: gl.tensor, # [M] / [cdiv(M, BLOCK_M)]
+    route_indices: gl.tensor, # [M]
+    M: gl.int64,
+    N: gl.int64,
+    K: gl.int64,
+    BLOCK_M: gl.constexpr,
+    BLOCK_N: gl.constexpr,
+    BLOCK_K: gl.constexpr,
+    GROUP_SIZE: gl.constexpr,
+    IS_OFFLINE: gl.constexpr,
+    num_stages: gl.constexpr,
+    num_warps: gl.constexpr,
+):
+    bidx, bidy = gl.program_id(0), gl.program_id(1)
+    bdimx, bdimy = gl.num_programs(0), gl.num_programs(1)
+
+    bidx, bidy = swizzle_l2(bidx, bidy, bdimx, bdimy, GROUP_SIZE)
+
+    dtype: gl.constexpr = mA_desc.dtype
+    sA = gl.allocate_shared_memory(dtype, [num_stages, BLOCK_M, BLOCK_K], mA_desc.layout)
+    sB = gl.allocate_shared_memory(dtype, [num_stages, BLOCK_N, BLOCK_K], mB_desc.layout)
+    sD = gl.allocate_shared_memory(dtype, [BLOCK_M, BLOCK_N], sD_layout)
+    
+    bars = gl.allocate_shared_memory(gl.uint64, [num_stages, 1], mbarrier.MBarrierLayout())
+    for i in gl.static_range(num_stages):
+        mbarrier.init(bars.index(i), count=1)
+    
+    m_base: gl.constexpr = bidx * BLOCK_M
+    n_base: gl.constexpr = bidy * BLOCK_N
+    num_k_tile: gl.constexpr = gl.cdiv(K, BLOCK_K)
+
+    producer = 0
+    consumer = 0
+    
+    # mma register layout per warp & thread
+    rD_layout = gl.NVMMADistributedLayout(
+        version=[2, 0],
+        warps_per_cta=num_warps,
+        instr_shape=[16, 8, 8] # m16n8k8
+    )
+    rA_layout = gl.DotOperandLayout(
+        operand_index=0,
+        parent=rD_layout,
+        k_width=32 // dtype.primitive_bitwidth,
+    )
+    rB_layout = gl.DotOperandLayout(
+        operand_index=1,
+        parent=rD_layout,
+        k_width=32 // dtype.primitive_bitwidth,
+    )
+    rD = sD.load(rD_layout).to(gl.float32)
+
+    # issue mask & index
+    indices_layout = gl.SliceLayout(0, gl.BlockedLayout([1, 4], [32, 1], [1, num_warps], [1, 0]))
+
+    if IS_OFFLINE:
+        rSkip = gl.load(route_mask + bidx)
+    else:
+        rMask = gl.load(
+            route_mask + m_base + gl.arange(0, BLOCK_M, layout=indices_layout),
+            mask=m_base + gl.arange(0, BLOCK_M, layout=indices_layout) < M,
+            other=0,
+        )
+        rSkip = gl.reduce_or(rMask, axis=-1)
+    
+    if rSkip > 0:
+        if IS_OFFLINE:
+            rIndices = gl.load(
+                route_indices + m_base + gl.arange(0, BLOCK_M, layout=indices_layout),
+                mask=m_base + gl.arange(0, BLOCK_M, layout=indices_layout) < M,
+                other=-1,
+            )
+        else:
+            rIndices = gl.load(
+                route_indices + m_base + gl.arange(0, BLOCK_M, layout=indices_layout),
+                mask=rMask > 0,
+                other=-1,
+            )
+
+        # prologue, issues first pipe - 1 loading
+        current_k = 0
+        for k in gl.static_range(0, num_stages - 1):
+            producer = issue_load_AB(
+                producer,
+                mA_desc, mB_desc, sA, sB,
+                n_base, current_k * BLOCK_K, rIndices,
+                bars, BLOCK_M, num_stages,
+            )
+            current_k += 1
+        
+        # mainloop, issue wmma
+        for k in gl.static_range(0, num_k_tile - (num_stages - 1)):
+            producer = issue_load_AB(
+                producer,
+                mA_desc, mB_desc, sA, sB,
+                n_base, current_k * BLOCK_K, rIndices,
+                bars, BLOCK_M, num_stages,
+            )
+            current_k += 1
+
+            consumer = issue_mma(
+                consumer,
+                sA, sB, sD,
+                rA_layout, rB_layout, rD,
+                bars, BLOCK_M, num_stages,
+            )
+        
+        # final (num_stages - 1) mma
+        for k in gl.static_range(num_k_tile - (num_stages - 1), num_k_tile):
+            consumer = issue_mma(
+                consumer,
+                sA, sB, sD,
+                rA_layout, rB_layout, rD,
+                bars, BLOCK_M, num_stages,
+            )
+        
+        # epilogue
+        sD.store(rD.to(dtype))
+        gl.store(
+            mD + rIndices * N + gl.arange(0, BLOCK_N),
+            sD, mask=(rIndices > 0)[:, None] & (gl.arange(0, BLOCK_N) < N),
+        )
+
+class BMSparseMLP:
+    support_kernel = [
+        'sort_online',
+        'sort_offline',
+    ]
+
+    @classmethod
+    def _sort_kernel(
+        cls,
+        x: torch.Tensor,
+        route_mask: torch.Tensor,
+        w: torch.Tensor,
+        b: Optional[torch.Tensor]=None,
+        BLOCK_M: Optional[int]=64,
+        BLOCK_N: Optional[int]=32,
+        BLOCK_K: Optional[int]=32,
+        GROUP_SIZE: Optional[int]=4,
+        num_stages: Optional[int]=3,
+        num_warps: Optional[int]=4,
+        do_not_specialize: Optional[List]=['M'],
+        **kwargs
+    ):
+        
+        B, L, D = x.shape
+
+        M = B * L
+        N = w.shape[0]
+        K = D
+
+        x_flat = x.reshape((M, D))
+        m_sort = kwargs.get('m_sort', None)
+        m_sort_indices = kwargs.get('m_sort_indices', None)
+
+        if m_sort_indices is None:
+            m_flat = route_mask.flatten(0, 1)
+            m_sort, m_sort_indices = torch.sort(m_flat, descending=True, stable=False)
+
+            if kwargs.get('is_offline', False):
+                # offline calculate skipping
+                m_sort_indices = m_sort_indices.masked_fill(m_sort.logical_not(), -1)
+                m_sort = torch.nn.functional.pad(m_sort, (0, BLOCK_M - M % BLOCK_M), value=0).reshape(-1, BLOCK_M)
+                m_sort = m_sort.any(dim=-1)
+        
+        out = torch.zeros((M, N), dtype=x.dtype, device=x.device)
+        grid = lambda meta: (triton.cdiv(M, meta['BLOCK_M']), triton.cdiv(N, meta['BLOCK_N']))
+
+        # tma descriptor
+        gl_dtype= getattr(gl, str(x_flat.dtype).split('.')[1])
+        A_desc_layout = gl.NVMMASharedLayout.get_default_for([BLOCK_M, BLOCK_K], gl_dtype)
+        B_desc_layout = gl.NVMMASharedLayout.get_default_for([BLOCK_N, BLOCK_K], gl_dtype)
+        sD_layout = gl.NVMMASharedLayout.get_default_for([BLOCK_M, BLOCK_N], gl_dtype)
+
+        A_desc = TensorDescriptor.from_tensor(x_flat, [1, BLOCK_K], A_desc_layout)
+        B_desc = TensorDescriptor.from_tensor(w, [BLOCK_N, BLOCK_K], B_desc_layout)
+
+        config = get_autotune_config(
+            params=['BLOCK_M', 'BLOCK_N', 'BLOCK_K', 'GROUP_SIZE', 'num_stages'],
+            BLOCK_M=BLOCK_M,
+            BLOCK_N=BLOCK_N,
+            BLOCK_K=BLOCK_K,
+            GROUP_SIZE=GROUP_SIZE,
+            num_stages=num_stages,
+        )
+        kernel = get_autotune_cache(
+            bm_sort_sm120_impl,
+            enable_autotune=True,
+            config=config,
+            keys=['M', 'N', 'K'],
+        )
+        kernel[grid](
+            x_flat, m_sort, m_sort_indices,
+            w, b, out,
+            M, N, K,
+            HAS_BIAS=b is not None,
+            IS_OFFLINE=kwargs.get('is_offline', False),
+        )
+
+        return rearrange(out, '(B L) N -> B L N', B=B, N=N), dict(
+            m_sort=m_sort,
+            m_sort_indices=m_sort_indices,
+        )

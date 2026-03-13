@@ -80,9 +80,9 @@ def get_autotune_cache(
 def get_autotune_config(params: List[str], **kwargs) -> List[triton.Config]:
     enable_autotune = kwargs.get('enable_autotune', False)
     if enable_autotune:
-        tuning_dict = {param: kwargs.get(f'{param}_list', kwargs.get(param)) for param in params}
+        tuning_dict = {param: kwargs.get(f'{param}_list', [kwargs.get(param)]) for param in params}
     else:
-        tuning_dict = {param: kwargs.get(param) for param in params}
+        tuning_dict = {param: [kwargs.get(param)] for param in params}
     
     return AutotuneMixin.generate_autotune_config(tuning_dict)
 

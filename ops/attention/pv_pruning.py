@@ -37,7 +37,7 @@ class PVSparseAttentionKernel(_PruningAttentionKernel):
         v: torch.Tensor,
         threshold: float,
         pad_offset: Optional[torch.Tensor]=None,
-        skip_block: Optional[torch.Tensor]=None,
+        execute_block: Optional[torch.Tensor]=None,
         impl: Optional[str]='blasst',
         **kwargs,
     ):
@@ -53,7 +53,7 @@ class PVSparseAttentionKernel(_PruningAttentionKernel):
             threshold: the BLASST style threshold for local max
             pad_offset: torch.Tensor with shape [batch_size,], the left padding offset for key and value
         Returns:
-            skip_block: torch.Tensor with shape [cdiv(key_length, 16)], manually specified skip block
+            execute_block: torch.Tensor with shape [cdiv(key_length, 16)], manually specified execute block
             out: torch.Tensor with shape same as q or kwargs.flatten_q
         """
         return PVSparsePrefill.kernel(
@@ -62,7 +62,7 @@ class PVSparseAttentionKernel(_PruningAttentionKernel):
             v=v,
             threshold=threshold,
             pad_offset=pad_offset,
-            skip_block=skip_block,
+            execute_block=execute_block,
             impl=impl,
             **kwargs,
         )
@@ -75,7 +75,7 @@ class PVSparseAttentionKernel(_PruningAttentionKernel):
         v: torch.Tensor,
         threshold: float,
         pad_offset: Optional[torch.Tensor]=None,
-        skip_block: Optional[torch.Tensor]=None,
+        execute_block: Optional[torch.Tensor]=None,
         impl: Optional[str]='blasst',
         **kwargs,
     ):
@@ -91,7 +91,7 @@ class PVSparseAttentionKernel(_PruningAttentionKernel):
             threshold: the BLASST style threshold for local max
             pad_offset: torch.Tensor with shape [batch_size,], the left padding offset for key and value
         Returns:
-            skip_block: torch.Tensor with shape [cdiv(key_length, 16)], manually specified skip block
+            execute_block: torch.Tensor with shape [cdiv(key_length, 16)], manually specified execute block
             out: torch.Tensor with shape [batch_size, 1, num_heads, head_dim]
         """
         return PVSparseDecode.kernel(
@@ -100,7 +100,7 @@ class PVSparseAttentionKernel(_PruningAttentionKernel):
             v=v,
             threshold=threshold,
             pad_offset=pad_offset,
-            skip_block=skip_block,
+            execute_block=execute_block,
             impl=impl,
             **kwargs,
         )
@@ -113,17 +113,18 @@ class PVSparseAttentionKernel(_PruningAttentionKernel):
         v: torch.Tensor,
         threshold: float,
         pad_offset: Optional[torch.Tensor]=None,
-        skip_block: Optional[torch.Tensor]=None,
+        execute_block: Optional[torch.Tensor]=None,
         prefill_impl: Optional[str]='blasst',
         decode_impl: Optional[str]='blasst',
+        enable_autotune: Optional[bool]=True,
         **kwargs,
     ):
         assert k.dim() == 4 and q.dim() == 4
         if q.shape[1] > 1:
-            return cls.base_prefill(q, k, v, threshold, pad_offset, skip_block, impl=prefill_impl)
+            return cls.base_prefill(q, k, v, threshold, pad_offset, execute_block, impl=prefill_impl, enable_autotune=enable_autotune)
         else:
             assert k.dim() == 4 and q.dim() == 4
-            return cls.base_decode(q, k, v, threshold, pad_offset, skip_block, impl=decode_impl)
+            return cls.base_decode(q, k, v, threshold, pad_offset, execute_block, impl=decode_impl, enable_autotune=enable_autotune)
     
     def _ref_forward(
         self,
@@ -132,18 +133,18 @@ class PVSparseAttentionKernel(_PruningAttentionKernel):
         v: torch.Tensor,
         attention_mask: Optional[torch.Tensor]=None,
         pad_offset: Optional[torch.Tensor]=None,
-        skip_block: Optional[torch.Tensor]=None,
+        execute_block: Optional[torch.Tensor]=None,
         block_size: Optional[int]=16,
     ):
-        if skip_block is not None: # eager mode
-            indices = skip_block.nonzero(as_tuple=True)[0]
+        if execute_block is not None: # eager mode
+            indices = execute_block.nonzero(as_tuple=True)[0]
             ks = rearrange(k, 'b (n s) h d -> b n s h d', s=block_size)[:, indices].flatten(1, 2)
             vs = rearrange(v, 'b (n s) h d -> b n s h d', s=block_size)[:, indices].flatten(1, 2)
         else:
             ks = k
             vs = v
 
-        o = DenseAttentionKernel.forward(q, ks, vs, None, pad_offset)
+        o = DenseAttentionKernel.forward(q, ks, vs, None, None, pad_offset)
         return o
     
     def precision_diff(self, repeat: Optional[int]=3, **kwargs):
@@ -159,8 +160,8 @@ class PVSparseAttentionKernel(_PruningAttentionKernel):
         for is_prefill in [True, False]:
             for i in range(repeat):
                 bsz = random.randint(1, 16)
-                seqlen = random.sample(range(1024, 4097, 128), 1)[0]
-                skip_block = torch.randint(0, 2, (triton.cdiv(seqlen, 16),), device=device)
+                seqlen = random.sample(list(range(1024, 4097, 128)), 1)[0]
+                execute_block = torch.randint(0, 2, (triton.cdiv(seqlen, 16),), device=device)
 
                 seqlen_q = seqlen if is_prefill else 1
                 seqlen_kv = seqlen
@@ -174,8 +175,8 @@ class PVSparseAttentionKernel(_PruningAttentionKernel):
 
                 pad_offset = seqlen_kv - attention_mask.sum(-1)
 
-                ref_out = self._ref_forward(deepcopy(q), deepcopy(k), deepcopy(v), attention_mask, pad_offset, skip_block)
-                out = self.forward(deepcopy(q), deepcopy(k), deepcopy(v), 0, pad_offset, skip_block)
+                ref_out = self._ref_forward(deepcopy(q), deepcopy(k), deepcopy(v), attention_mask, pad_offset, execute_block)
+                out = self.forward(deepcopy(q), deepcopy(k), deepcopy(v), 0, pad_offset, execute_block, enable_autotune=False, BLOCK_N=16)
 
                 diff = torch.abs(out - ref_out)
                 mean_diff = diff.mean().item()
@@ -281,8 +282,9 @@ class PVSparseAttentionKernel(_PruningAttentionKernel):
                     q=q,
                     k=k,
                     v=v,
+                    threshold=-1,
                     pad_offset=torch.zeros((bsz, seqlen_q), dtype=torch.int32, device=device),
-                    skip_block=(mask < sparsity).to(device),
+                    execute_block=(mask > sparsity).to(device),
                 )
                 if 'prefill' in mode: func_kwargs['prefill_impl'] = provider if provider != 'triton' else impl
                 elif 'decode' in mode: func_kwargs['decode_impl'] = provider if provider != 'triton' else impl

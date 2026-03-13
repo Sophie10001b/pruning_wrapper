@@ -17,7 +17,7 @@ def blasst_impl(
     k: tl.tensor,
     v: tl.tensor,
     pad_offset: tl.tensor, # [B]
-    skip_block: tl.tensor, # Optional [LK // BLOCK_N]
+    execute_block: tl.tensor, # Optional [LK // BLOCK_N]
     out: tl.tensor, # [B, 1, HQ, splitk, D]
     metadata: tl.tensor, # Optional [B, 1, HQ, 2, splitk]
     LK: tl.int64,
@@ -39,6 +39,7 @@ def blasst_impl(
 
     score_max = tl.full([BLOCK_M], -float('inf'), dtype=tl.float32)
     score_sum = tl.zeros([BLOCK_M], dtype=tl.float32)
+    score_scale = tl.full([BLOCK_M], 1.0, dtype=tl.float32)
     acc = tl.zeros([BLOCK_M, D], dtype=tl.float32)
 
     start_q, end_q = batch_id, batch_id + 1
@@ -56,7 +57,6 @@ def blasst_impl(
         other=0.0
     )
 
-    score_scale = 1
     split_n_range = tl.cdiv(key_length, BLOCK_N)
     for tile_n in tl.range(0, split_n_range):
         key_range_mask = ((tile_n * BLOCK_N + tl.arange(0, BLOCK_N)) < key_length)
@@ -76,8 +76,8 @@ def blasst_impl(
         is_greater_than_threshold = tl.reduce_or(tl.exp2(score_max_new - score_local_max) * score_scale > threshold, axis=0)
 
         if predefined_skip:
-            need_skip = tl.load(skip_block + tile_kv)
-            is_greater_than_threshold &= (not need_skip)
+            need_execute = tl.load(execute_block + tile_n)
+            is_greater_than_threshold &= (need_execute == 1)
         
         if is_greater_than_threshold:
             value_data = tl.load(
@@ -170,7 +170,7 @@ class PVSparseDecode:
         v: torch.Tensor,
         threshold: float,
         pad_offset: Optional[torch.Tensor]=None,
-        skip_block: Optional[torch.Tensor]=None,
+        execute_block: Optional[torch.Tensor]=None,
         BLOCK_M: Optional[int]=16,
         BLOCK_N: Optional[int]=32,
         split_size: Optional[int]=0,
@@ -206,10 +206,10 @@ class PVSparseDecode:
 
         if split_size == 0:
             kernel[grid](
-                q, k, v, pad_offset, skip_block, out, None,
+                q, k, v, pad_offset, execute_block, out, None,
                 LK, split_size, HQ, HK, D, G, 1, D**-0.5, threshold,
                 kv_split=False,
-                predefined_skip=skip_block is not None,
+                predefined_skip=execute_block is not None,
             )
         
         else:
@@ -225,10 +225,10 @@ class PVSparseDecode:
             )
 
             kernel[grid](
-                q, k, v, pad_offset, skip_block, out_local, metadata,
+                q, k, v, pad_offset, execute_block, out_local, metadata,
                 LK, split_size, HQ, HK, D, G, num_split, D**-0.5, threshold,
                 kv_split=True,
-                predefined_skip=skip_block is not None,
+                predefined_skip=execute_block is not None,
             )
             grid = lambda meta: (HQ, B)
             merge_kernel[grid](
@@ -275,6 +275,7 @@ class PVSparseDecode:
 
         BLOCK_M = max(16, triton.next_power_of_2(G))
         BLOCK_N = min(64, max(16, triton.next_power_of_2(LK)))
+        BLOCK_N = kwargs.pop('BLOCK_N', BLOCK_N)
         num_stages = 3
         num_warps = 4
 

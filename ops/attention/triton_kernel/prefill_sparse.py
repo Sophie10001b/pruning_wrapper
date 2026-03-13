@@ -17,7 +17,7 @@ def blasst_impl(
     k: tl.tensor,
     v: tl.tensor,
     pad_offset: tl.tensor, # [B]
-    skip_block: tl.tensor, # Optional [LK // BLOCK_N]
+    execute_block: tl.tensor, # Optional [LK // BLOCK_N]
     out: tl.tensor,
     LQ: tl.int64,
     LK: tl.int64,
@@ -35,6 +35,7 @@ def blasst_impl(
 
     score_max = tl.full([BLOCK_M], -float('inf'), dtype=tl.float32)
     score_sum = tl.zeros([BLOCK_M], dtype=tl.float32)
+    score_scale = tl.full([BLOCK_M], 1.0, dtype=tl.float32)
     acc = tl.zeros([BLOCK_M, D], dtype=tl.float32)
 
     qk_scale *= 1.44269504 # 1/log(2)
@@ -57,7 +58,6 @@ def blasst_impl(
         other=0.0,
     )
 
-    score_scale = 1
     num_kv_iter = tl.cdiv((query_id + 1) * BLOCK_M - pad_offset_kv + 1, BLOCK_N)
     for tile_kv in tl.range(0, num_kv_iter):
         key_seq_range = tile_kv * BLOCK_N + tl.arange(0, BLOCK_N) + pad_offset_kv
@@ -70,7 +70,7 @@ def blasst_impl(
 
         qk = tl.dot(query_data, key_data.T) * qk_scale
         # causal mask for each query pos
-        causal_mask = query_seq_range >= key_seq_range[None, :]
+        causal_mask = query_seq_range[:, None] >= key_seq_range[None, :]
         qk = tl.where(causal_mask & (query_range_mask[:, None] & key_range_mask[None, :]), qk, -float('inf'))
 
         score_local_max = tl.max(qk, 1)
@@ -78,8 +78,8 @@ def blasst_impl(
         is_greater_than_threshold = tl.reduce_or(tl.exp2(score_max_new - score_local_max) * score_scale > threshold, axis=0)
 
         if predefined_skip:
-            need_skip = tl.load(skip_block + tile_kv)
-            is_greater_than_threshold &= (not need_skip)
+            need_execute = tl.load(execute_block + tile_kv)
+            is_greater_than_threshold &= (need_execute == 1)
 
         if is_greater_than_threshold: # continue load V on smem and compute PV
             value_data = tl.load(
@@ -116,7 +116,7 @@ class PVSparsePrefill:
         v: torch.Tensor,
         threshold: float,
         pad_offset: Optional[torch.Tensor]=None,
-        skip_block: Optional[torch.Tensor]=None,
+        execute_block: Optional[torch.Tensor]=None,
         BLOCK_M: Optional[int]=64,
         BLOCK_N: Optional[int]=32,
         num_stages: Optional[int]=2,
@@ -146,9 +146,9 @@ class PVSparsePrefill:
             do_not_specialize=['qk_scale', 'threshold']
         )
         kernel[grid](
-            q, k, v, pad_offset, skip_block, out,
+            q, k, v, pad_offset, execute_block, out,
             LQ, LK, HQ, HK, D, G, D**-0.5, threshold,
-            predefined_skip=skip_block is not None,
+            predefined_skip=execute_block is not None,
         )
         return out
     
