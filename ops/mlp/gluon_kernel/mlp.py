@@ -90,7 +90,6 @@ def issue_mma(
     rB = sB.load(rB_layout)
 
     mma_v2(rA, rB.T, rD)
-    mbarrier.invalidate(bar)
     return consumer
 
 # SM120 gather & scatter fuse gemm, with TMA gather4 load A, TMA load B, sm80 wmma run A@B, and
@@ -209,13 +208,16 @@ def bm_sort_sm120_impl(
             )
         
         # final (num_stages - 1) mma
-        for k in gl.static_range(num_k_tile - (num_stages - 1), num_k_tile):
+        for k in gl.static_range(0, num_stages - 1):
             consumer = issue_mma(
                 consumer,
                 sA, sB, sD,
                 rA_layout, rB_layout, rD,
                 bars, BLOCK_M, num_stages,
             )
+
+        for i in gl.static_range(num_stages):
+            mbarrier.invalidate(bars.index(i))
         
         # epilogue
         sD.store(rD.to(dtype))
@@ -280,12 +282,10 @@ class BMSparseMLP:
         B_desc = TensorDescriptor.from_tensor(w, [BLOCK_N, BLOCK_K], B_desc_layout)
 
         config = get_autotune_config(
-            params=['BLOCK_M', 'BLOCK_N', 'BLOCK_K', 'GROUP_SIZE', 'num_stages'],
-            BLOCK_M=BLOCK_M,
-            BLOCK_N=BLOCK_N,
-            BLOCK_K=BLOCK_K,
+            params=['GROUP_SIZE', 'num_stages'],
             GROUP_SIZE=GROUP_SIZE,
             num_stages=num_stages,
+            **kwargs,
         )
         kernel = get_autotune_cache(
             bm_sort_sm120_impl,
@@ -294,14 +294,106 @@ class BMSparseMLP:
             keys=['M', 'N', 'K'],
         )
         kernel[grid](
-            x_flat, m_sort, m_sort_indices,
-            w, b, out,
+            A_desc, B_desc, w, sD_layout,
+            m_sort, m_sort_indices,
             M, N, K,
-            HAS_BIAS=b is not None,
+            BLOCK_M=BLOCK_M,
+            BLOCK_N=BLOCK_N,
+            BLOCK_K=BLOCK_K,
             IS_OFFLINE=kwargs.get('is_offline', False),
         )
 
         return rearrange(out, '(B L) N -> B L N', B=B, N=N), dict(
             m_sort=m_sort,
             m_sort_indices=m_sort_indices,
+        )
+    
+    @classmethod
+    def kernel(
+        cls,
+        impl: str,
+        **kwargs
+    ):
+        """
+        Get kernel for token sparse MLP, where x = [M, K], weight = [N, K]\\
+        **sort:**\\
+        Return the same shape as input, with additional sort prologue for better skipping
+        Args:
+            x: torch.Tensor with shape [batch_size, seqlen, hidden_size]
+            route_mask: torch.Tensor with shape [batch_size, seqlen], 1 for active token
+            w: torch.Tensor with shape [intermediate_size, hidden_size], weight
+            b: torch.Tensor with shape [hidden_size], bias
+            sorted_mask: optional, torch.Tensor with shape [batch_size, seqlen], 1 for active token, sorted
+            sorted_indices: optinal, torch.Tensor with shape [batch_size, seqlen], index of sorted route_mask
+            estimated_sparsity: optinal, float, estimated sparsity of route_mask
+            impl: str, impl of kernel
+            do_not_specialize: List, omit kernel re-compile for these variables
+        """        
+        x = kwargs.get('x')
+        w = kwargs.get('w')
+        dtype = x.dtype
+        device = x.device
+
+        B, L, D = x.shape
+        M, N, K = B * L, w.shape[0], D
+        route_mask = kwargs.pop('route_mask', None)
+        
+        # get tiling
+        num_sm = torch.cuda.get_device_properties("cuda").multi_processor_count
+        cc = torch.cuda.get_device_capability("cuda")[0]
+        num_stages = 3
+        num_warps = 4
+        group_size = 4
+
+        estimated_sparsity = kwargs.pop('estimated_sparsity', 0)
+        if route_mask is None:
+            estimated_sparsity = 1
+            route_mask = torch.ones((B, L), dtype=torch.bool, device=device)
+        
+        if impl == 'auto': # auto dispatch
+            if route_mask is None: impl = 'dense'
+            else: impl = 'sort_offline'
+
+        if impl in ['sort_offline', 'sort_online']:
+            BLOCK_M = triton.next_power_of_2(int(M * estimated_sparsity))
+            if BLOCK_M > int(M * estimated_sparsity): BLOCK_M = BLOCK_M >> 1
+
+            BLOCK_M = min(128, max(16, BLOCK_M))
+            BLOCK_N = min(128, max(16, triton.next_power_of_2(N)))
+            
+            BLOCK_M = kwargs.pop('BLOCK_M', BLOCK_M)
+            BLOCK_N = kwargs.pop('BLOCK_N', BLOCK_N)
+            BLOCK_K = min(64, max(32, triton.next_power_of_2(K)))
+
+            while BLOCK_N * BLOCK_K > 128 * 128 and BLOCK_K > 32:
+                BLOCK_K = BLOCK_K >> 1
+
+            while BLOCK_M * BLOCK_N * BLOCK_K > 128 * 64 * 64 and BLOCK_K > 32:
+                BLOCK_K = BLOCK_K >> 1
+            
+            BLOCK_K = kwargs.pop('BLOCK_K', BLOCK_K)
+        else:
+            BLOCK_M = -1
+            BLOCK_N = -1
+            BLOCK_K = -1
+        
+        if impl not in cls.support_kernel:
+            raise ValueError(f"{impl} is not supported")
+        
+        is_offline = impl == 'sort_offline'
+        impl = impl.split('_')[0]
+        return getattr(cls, f"_{impl}_kernel")(
+            BLOCK_M=BLOCK_M,
+            BLOCK_N=BLOCK_N,
+            BLOCK_K=BLOCK_K,
+            GROUP_SIZE=group_size,
+            num_stages=num_stages,
+            num_warps=num_warps,
+            route_mask=route_mask,
+            is_offline=is_offline,
+            BLOCK_M_list=[16, 32, 64, 128],
+            BLOCK_N_list=[32, 64, 128],
+            BLOCK_K_list=[32, 64],
+            num_stages_list=[2, 3],
+            **kwargs
         )

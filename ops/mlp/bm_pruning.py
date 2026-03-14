@@ -11,9 +11,11 @@ from einops import rearrange
 from triton.testing import do_bench, do_bench_cudagraph
 
 from .base import _PruningMLPKernel, DenseMLPKernel, ACT2FUNC
-from .triton_kernel.mlp import BMSparseMLP
+# from .triton_kernel.mlp import BMSparseMLP
 from .triton_kernel.glu import BMSparseGLU
 from .triton_kernel.ffn import BMSparseGLUBMSparseMLP
+
+from .gluon_kernel.mlp import BMSparseMLP
 
 os.environ['TRITON_PRINT_AUTOTUNING']='0'
 os.environ['CUDA_LAUNCH_BLOCKING']='0'
