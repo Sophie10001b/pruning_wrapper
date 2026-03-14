@@ -4,6 +4,8 @@ import torch
 import triton
 import triton.language as tl
 
+from triton.experimental import gluon
+
 from typing import Optional, List, Tuple, Dict, Any, Callable
 from einops import rearrange
 
@@ -47,15 +49,24 @@ class AutotuneMixin:
         config: Optional[List[triton.Config]]=[],
         keys: Optional[List[str]]=[],
         do_not_specialize: Optional[List[str]]=[],
+        is_gluon: Optional[bool]=False,
         **kwargs,
     ):
         def decorator(func):
-            if enable_autotune:
-                return triton.autotune(configs=config, key=keys)(
-                    triton.jit(func, do_not_specialize=do_not_specialize)
-                )
+            if is_gluon:
+                if enable_autotune:
+                    return triton.autotune(configs=config, key=keys)(
+                        gluon.jit(func, do_not_specialize=do_not_specialize)
+                    )
+                else:
+                    return gluon.jit(func, do_not_specialize=do_not_specialize)
             else:
-                return triton.jit(func, do_not_specialize=do_not_specialize)
+                if enable_autotune:
+                    return triton.autotune(configs=config, key=keys)(
+                        triton.jit(func, do_not_specialize=do_not_specialize)
+                    )
+                else:
+                    return triton.jit(func, do_not_specialize=do_not_specialize)
         return decorator
 
 # call cache
@@ -63,16 +74,19 @@ def get_autotune_cache(
     func: Callable,
     enable_autotune,
     config, keys,
-    do_not_specialize: Optional[List[str]]=[]
+    do_not_specialize: Optional[List[str]]=[],
+    is_gluon: Optional[bool]=False,
 ):
     """Get cached kernel to avoid recompilation"""
     func_name = func.__name__
-    cache_key = (func_name, enable_autotune, tuple(config), tuple(keys), tuple(do_not_specialize))
+    cache_key = (func_name, enable_autotune, tuple(config), tuple(keys), tuple(do_not_specialize), is_gluon)
     if cache_key not in _autotune_cache:
         _autotune_cache[cache_key] = AutotuneMixin.conditional_jit(
             enable_autotune=enable_autotune,
             config=list(config),
             keys=keys,
+            do_not_specialize=do_not_specialize,
+            is_gluon=is_gluon,
         )(func)
     return _autotune_cache[cache_key]
 
