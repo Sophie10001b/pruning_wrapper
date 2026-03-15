@@ -11,11 +11,11 @@ from einops import rearrange
 from triton.testing import do_bench, do_bench_cudagraph
 
 from .base import _PruningMLPKernel, DenseMLPKernel, ACT2FUNC
-# from .triton_kernel.mlp import BMSparseMLP
+from .triton_kernel.mlp import BMSparseMLP
 from .triton_kernel.glu import BMSparseGLU
 from .triton_kernel.ffn import BMSparseGLUBMSparseMLP
 
-from .gluon_kernel.mlp import BMSparseMLP
+# from .gluon_kernel.mlp import BMSparseMLP
 
 os.environ['TRITON_PRINT_AUTOTUNING']='0'
 os.environ['CUDA_LAUNCH_BLOCKING']='0'
@@ -169,6 +169,7 @@ class BMSparseMLPKernel(_PruningMLPKernel):
         activation: Optional[str]='identity',
         estimated_sparsity: Optional[float]=0,
         prefill_impl: Optional[str]='auto',
+        enable_autotune: Optional[bool]=False,
         **kwargs,
     ):
         assert x.dim() == 3
@@ -187,6 +188,7 @@ class BMSparseMLPKernel(_PruningMLPKernel):
             activation=activation,
             estimated_sparsity=estimated_sparsity,
             impl=prefill_impl,
+            enable_autotune=enable_autotune,
             **kwargs,
         )
     
@@ -257,7 +259,7 @@ class BMSparseMLPKernel(_PruningMLPKernel):
         gate = nn.Linear(hidden_size, intermediate_size, bias=False, device=device, dtype=dtype)
         down = nn.Linear(intermediate_size, hidden_size, bias=False, device=device, dtype=dtype)
 
-        for ffn_type in ['mlp', 'glu', 'ffn']:
+        for ffn_type in ['mlp']:
             for i in range(repeat):
                 seqlen = random.randint(1024, 4096)
                 sparsity = min(0.9, random.random())
@@ -433,16 +435,16 @@ def run_test(*args, **kwargs):
     print(f"2. Test throughput")
     bench = kernel.get_benchmark(
         bench_name='M',
-        bench_range=[2 ** i for i in range(0, 15)],
+        bench_range=[2 ** i for i in range(0, 13)],
         M=4096,
         N=14336,
         K=4096,
         sparsity=0.5,
         device=device,
         dtype=dtype,
-        impl=['atomic', 'reduce', 'seperate'],
-        mode='ffn-cudagraph',
-        tag='',
+        impl=['sort_offline', 'sort_online'],
+        mode='mlp-cudagraph',
+        tag='triton_v2',
         x_log=True,
     )
 

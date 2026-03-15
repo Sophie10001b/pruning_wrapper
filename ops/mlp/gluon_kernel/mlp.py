@@ -34,15 +34,15 @@ def swizzle_l2(i, j, size_i, size_j, size_g):
 
 @gluon.jit
 def issue_load_AB(
-    producer,
-    mA_desc,
-    mB_desc,
-    sA,
-    sB,
+    producer: gl.uint32,
+    mA_desc: tma.tensor_descriptor,
+    mB_desc: tma.tensor_descriptor,
+    sA: gl.shared_memory_descriptor,
+    sB: gl.shared_memory_descriptor,
+    bars: gl.shared_memory_descriptor,
     n_base,
     k_offset,
-    mA_idx,
-    bars,
+    mA_idx: gl.tensor,
     BLOCK_M: gl.constexpr,
     num_stages: gl.constexpr,
     pred=True,
@@ -68,13 +68,13 @@ def issue_load_AB(
 
 @gluon.jit
 def issue_mma(
-    consumer,
-    sA,
-    sB,
-    rA_layout,
-    rB_layout,
-    rD,
-    bars,
+    consumer: gl.uint32,
+    sA: gl.shared_memory_descriptor,
+    sB: gl.shared_memory_descriptor,
+    bars: gl.shared_memory_descriptor,
+    rA_layout: gl.constexpr,
+    rB_layout: gl.constexpr,
+    rD: gl.tensor,
     num_stages: gl.constexpr,
 ):
     index = consumer % num_stages
@@ -87,19 +87,18 @@ def issue_mma(
     rA = sA.index(index).load(rA_layout)
     rB = sB.index(index).permute((1, 0)).load(rB_layout)
 
-    mma_v2(rA, rB, rD)
-    return consumer
+    rD = mma_v2(rA, rB, rD)
+    return consumer, rD
 
 # SM120 gather & scatter fuse gemm, with TMA gather4 load A, TMA load B, sm80 wmma run A@B, and
 # store to D (not support scatter4). Pipeline style is under sm80, without persist / WS trick.
 
-@gluon.jit
 def bm_sort_sm120_impl(
     mA_desc: tma.tensor_descriptor,
     mB_desc: tma.tensor_descriptor,
-    mD_desc: tma.tensor_descriptor,
-    route_mask, # [M] / [cdiv(M, BLOCK_M)]
-    route_indices, # [M]
+    mD,
+    route_mask: gl.tensor, # [M] / [cdiv(M, BLOCK_M)]
+    route_indices: gl.tensor, # [M]
     M: gl.int64,
     N: gl.int64,
     K: gl.int64,
@@ -119,7 +118,7 @@ def bm_sort_sm120_impl(
     dtype: gl.constexpr = mA_desc.dtype
     sA = gl.allocate_shared_memory(dtype, [num_stages, BLOCK_M, BLOCK_K], mA_desc.layout)
     sB = gl.allocate_shared_memory(dtype, [num_stages, BLOCK_N, BLOCK_K], mB_desc.layout)
-    sD = gl.allocate_shared_memory(dtype, [BLOCK_M, BLOCK_N], gl.NVMMASharedLayout.get_default_for([BLOCK_M, BLOCK_N], dtype))
+    # sD = gl.allocate_shared_memory(dtype, [BLOCK_M, BLOCK_N], mD_desc.layout)
     
     bars = gl.allocate_shared_memory(gl.uint64, [num_stages, 1], mbarrier.MBarrierLayout())
     for i in gl.static_range(num_stages):
@@ -129,13 +128,13 @@ def bm_sort_sm120_impl(
     n_base = bidy * BLOCK_N
     num_k_tile = gl.cdiv(K, BLOCK_K)
 
-    producer = 0
-    consumer = 0
+    producer: gl.uint32 = 0
+    consumer: gl.uint32 = 0
     
     # mma register layout per warp & thread
     rD_layout: gl.constexpr = gl.NVMMADistributedLayout(
         version=[2, 0],
-        warps_per_cta=[2, num_warps // 2],
+        warps_per_cta=[1, num_warps],
         instr_shape=[16, 8] # m16n8k8
     )
     rA_layout: gl.constexpr = gl.DotOperandLayout(
@@ -148,11 +147,11 @@ def bm_sort_sm120_impl(
         parent=rD_layout,
         k_width=32 // dtype.primitive_bitwidth,
     )
-    rD = sD.load(rD_layout).to(gl.float32)
+    rD = gl.zeros([BLOCK_M, BLOCK_N], gl.float32, layout=rD_layout)
 
     # issue mask & index
-    # indices_layout: gl.constexpr = gl.SliceLayout(1, gl.BlockedLayout([4, 1], [1, 32], [1, num_warps], [1, 0]))
-    indices_layout: gl.constexpr = gl.SliceLayout(0, gl.BlockedLayout([1, 4], [32, 1], [1, num_warps], [1, 0]))
+    mn_layout: gl.constexpr = gl.BlockedLayout([4, 1], [1, 32], [num_warps, 1], [1, 0])
+    indices_layout: gl.constexpr = gl.SliceLayout(1, mn_layout)
 
     if IS_OFFLINE:
         rSkip = gl.load(route_mask + bidx)
@@ -169,13 +168,13 @@ def bm_sort_sm120_impl(
             rIndices = gl.load(
                 route_indices + m_base + gl.arange(0, BLOCK_M, layout=indices_layout),
                 mask=m_base + gl.arange(0, BLOCK_M, layout=indices_layout) < M,
-                other=-1,
+                other=M,
             )
         else:
             rIndices = gl.load(
                 route_indices + m_base + gl.arange(0, BLOCK_M, layout=indices_layout),
                 mask=rMask > 0,
-                other=-1,
+                other=M,
             )
 
         # prologue, issues first pipe - 1 loading
@@ -183,9 +182,9 @@ def bm_sort_sm120_impl(
         for k in gl.static_range(0, num_stages - 1):
             producer = issue_load_AB(
                 producer,
-                mA_desc, mB_desc, sA, sB,
+                mA_desc, mB_desc, sA, sB, bars,
                 n_base, current_k * BLOCK_K, rIndices,
-                bars, BLOCK_M, num_stages,
+                BLOCK_M, num_stages,
             )
             current_k += 1
         
@@ -193,44 +192,44 @@ def bm_sort_sm120_impl(
         for k in range(0, num_k_tile - (num_stages - 1)):
             producer = issue_load_AB(
                 producer,
-                mA_desc, mB_desc, sA, sB,
+                mA_desc, mB_desc, sA, sB, bars,
                 n_base, current_k * BLOCK_K, rIndices,
-                bars, BLOCK_M, num_stages,
+                BLOCK_M, num_stages,
             )
             current_k += 1
 
-            consumer = issue_mma(
+            consumer, rD = issue_mma(
                 consumer,
-                sA, sB,
+                sA, sB, bars,
                 rA_layout, rB_layout, rD,
-                bars, num_stages,
+                num_stages,
             )
         
         # final (num_stages - 1) mma
         for k in gl.static_range(0, num_stages - 1):
-            consumer = issue_mma(
+            consumer, rD = issue_mma(
                 consumer,
-                sA, sB,
+                sA, sB, bars,
                 rA_layout, rB_layout, rD,
-                bars, num_stages,
+                num_stages,
             )
 
         for i in gl.static_range(num_stages):
             mbarrier.invalidate(bars.index(i))
         
         # epilogue
-        sD.store(rD.to(dtype))
-        # rD_new = sD.load(gl.BlockedLayout([4, 1], [1, 32], [1, num_warps], [1, 0]))
-        # gl.store(
-        #     mD + (rIndices * N)[:, None] + n_base + gl.arange(0, BLOCK_N)[None, :],
-        #     rD_new, mask=(rIndices > 0)[:, None] & (n_base + gl.arange(0, BLOCK_N) < N)[None, :],
-        # )
+        # sD.store(rD.to(dtype))
+        # rD_new = sD.load(mn_layout)
 
-        fence_async_shared()
-        # for i in gl.static_range(0, BLOCK_M):
-        tma.async_copy_shared_to_global(mD_desc, [m_base, n_base], sD)
-        
-        tma.store_wait(pendings=0)
+        mn_r2g_layout: gl.constexpr = gl.BlockedLayout([1, 8], [8, 4], [2, 2], [1, 0])
+        rIndices = gl.convert_layout(rIndices, gl.SliceLayout(1, mn_r2g_layout), assert_trivial=False)
+
+        rD_new = gl.convert_layout(rD, mn_r2g_layout, assert_trivial=False)
+        gl.store(
+            mD + rIndices[:, None] * N + n_base + gl.arange(0, BLOCK_N)[None, :],
+            rD_new,
+            mask=(rIndices < M)[:, None] & (n_base + gl.arange(0, BLOCK_N) < N)[None, :],
+        )
 
 class BMSparseMLP:
     support_kernel = [
@@ -282,37 +281,33 @@ class BMSparseMLP:
         gl_dtype = getattr(gl, str(x_flat.dtype).split('.')[1])
         A_desc_layout = gl.NVMMASharedLayout.get_default_for([BLOCK_M, BLOCK_K], gl_dtype)
         B_desc_layout = gl.NVMMASharedLayout.get_default_for([BLOCK_N, BLOCK_K], gl_dtype)
-        D_desc_layout = gl.NVMMASharedLayout.get_default_for([BLOCK_M, BLOCK_N], gl_dtype)
-        # sD_layout = gl.NVMMASharedLayout.get_default_for([BLOCK_M, BLOCK_N], gl_dtype)
+        # D_desc_layout = gl.NVMMASharedLayout.get_default_for([BLOCK_M, BLOCK_N], gl_dtype)
 
         A_desc = TensorDescriptor.from_tensor(x_flat, [1, BLOCK_K], A_desc_layout)
         B_desc = TensorDescriptor.from_tensor(w, [BLOCK_N, BLOCK_K], B_desc_layout)
-        D_desc = TensorDescriptor.from_tensor(out, [BLOCK_M, BLOCK_N], D_desc_layout)
+        # D_desc = TensorDescriptor.from_tensor(out, [1, BLOCK_N], D_desc_layout)
 
-        # config = get_autotune_config(
-        #     params=['GROUP_SIZE', 'num_stages'],
-        #     GROUP_SIZE=GROUP_SIZE,
-        #     num_stages=num_stages,
-        #     **kwargs,
-        # )
-        # kernel = get_autotune_cache(
-        #     bm_sort_sm120_impl,
-        #     enable_autotune=True,
-        #     config=config,
-        #     keys=['M', 'N', 'K'],
-        #     is_gluon=True
-        # )
-        bm_sort_sm120_impl[grid](
-            A_desc, B_desc, D_desc,
+        config = get_autotune_config(
+            params=['GROUP_SIZE', 'num_stages'],
+            GROUP_SIZE=GROUP_SIZE,
+            num_stages=num_stages,
+            **kwargs,
+        )
+        kernel = get_autotune_cache(
+            bm_sort_sm120_impl,
+            enable_autotune=True,
+            config=config,
+            keys=['M', 'N', 'K'],
+            is_gluon=True
+        )
+        kernel[grid](
+            A_desc, B_desc, out,
             m_sort, m_sort_indices.to(torch.uint32),
             M, N, K,
             BLOCK_M=BLOCK_M,
             BLOCK_N=BLOCK_N,
             BLOCK_K=BLOCK_K,
-            GROUP_SIZE=GROUP_SIZE,
             IS_OFFLINE=kwargs.get('is_offline', False),
-            num_stages=num_stages,
-            num_warps=num_warps,
         )
 
         return rearrange(out, '(B L) N -> B L N', B=B, N=N), dict(
@@ -368,7 +363,7 @@ class BMSparseMLP:
 
         if impl in ['sort_offline', 'sort_online']:
             BLOCK_M = triton.next_power_of_2(int(M * estimated_sparsity))
-            if BLOCK_M > int(M * estimated_sparsity): BLOCK_M = BLOCK_M >> 1
+            if BLOCK_M >= int(M * estimated_sparsity): BLOCK_M = BLOCK_M >> 1
 
             BLOCK_M = min(128, max(16, BLOCK_M))
             BLOCK_N = min(128, max(16, triton.next_power_of_2(N)))

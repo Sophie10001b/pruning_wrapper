@@ -175,6 +175,7 @@ class BMSparseMLP:
             BLOCK_K=BLOCK_K,
             GROUP_SIZE=GROUP_SIZE,
             num_stages=num_stages,
+            **kwargs,
         )
         kernel = get_autotune_cache(
             bm_sort_impl,
@@ -244,7 +245,7 @@ class BMSparseMLP:
 
         if impl in ['sort_offline', 'sort_online']:
             BLOCK_M = triton.next_power_of_2(int(M * estimated_sparsity))
-            if BLOCK_M > int(M * estimated_sparsity): BLOCK_M = BLOCK_M >> 1
+            if BLOCK_M >= int(M * estimated_sparsity): BLOCK_M = BLOCK_M >> 1
 
             BLOCK_M = min(128, max(16, BLOCK_M))
             BLOCK_N = min(128, max(16, triton.next_power_of_2(N)))
