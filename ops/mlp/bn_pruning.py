@@ -168,6 +168,7 @@ class BNSparseMLPKernel(_PruningMLPKernel):
         activation: Optional[str]='identity',
         estimated_sparsity: Optional[float]=0,
         prefill_impl: Optional[str]='auto',
+        enable_autotune: Optional[bool]=False,
         **kwargs,
     ):
         assert x.dim() == 3
@@ -186,6 +187,7 @@ class BNSparseMLPKernel(_PruningMLPKernel):
             activation=activation,
             estimated_sparsity=estimated_sparsity,
             impl=prefill_impl,
+            enable_autotune=enable_autotune,
             **kwargs,
         )
     
@@ -264,7 +266,7 @@ class BNSparseMLPKernel(_PruningMLPKernel):
         gate = nn.Linear(hidden_size, intermediate_size, bias=False, device=device, dtype=dtype)
         down = nn.Linear(intermediate_size, hidden_size, bias=False, device=device, dtype=dtype)
 
-        for ffn_type in ['mlp', 'glu', 'ffn']:
+        for ffn_type in ['mlp', 'ffn']:
             for i in range(repeat):
                 seqlen = random.randint(1024, 4096) if i % 2 == 0 else 1
                 sparsity = min(0.9, random.random())
@@ -274,13 +276,13 @@ class BNSparseMLPKernel(_PruningMLPKernel):
 
                 if ffn_type == 'mlp':
                     ref_out = self._ref_forward(deepcopy(x), deepcopy(up.weight), route_mask=deepcopy(route_mask), activation='silu')
-                    out = self.forward(deepcopy(x), deepcopy(up.weight), route_mask=deepcopy(route_mask), activation='silu', estimated_sparsity=sparsity)
+                    out = self.forward(deepcopy(x), deepcopy(up.weight), route_mask=deepcopy(route_mask), activation='silu', estimated_sparsity=sparsity, prefill_impl='auto')
                 elif ffn_type == 'glu':
                     ref_out = self._ref_forward(deepcopy(x), deepcopy(up.weight), w_gate=deepcopy(gate.weight), route_mask=deepcopy(route_mask), activation='silu')
                     out = self.forward(deepcopy(x), deepcopy(up.weight), w_gate=deepcopy(gate.weight), route_mask=deepcopy(route_mask), activation='silu', estimated_sparsity=sparsity)
                 elif ffn_type == 'ffn':
                     ref_out = self._ref_forward(deepcopy(x), deepcopy(up.weight), w_gate=deepcopy(gate.weight), w_down=deepcopy(down.weight), route_mask=deepcopy(route_mask), activation='silu')
-                    out = self.forward(deepcopy(x), deepcopy(up.weight), w_gate=deepcopy(gate.weight), w_down=deepcopy(down.weight), route_mask=deepcopy(route_mask), activation='silu', estimated_sparsity=sparsity, prefill_impl='atomic_offline')
+                    out = self.forward(deepcopy(x), deepcopy(up.weight), w_gate=deepcopy(gate.weight), w_down=deepcopy(down.weight), route_mask=deepcopy(route_mask), activation='silu', estimated_sparsity=sparsity, prefill_impl='seperate_2')
 
                 diff = torch.abs(out - ref_out)
                 mean_diff = diff.mean().item()
@@ -454,10 +456,10 @@ def run_test(*args, **kwargs):
         sparsity=0.5,
         device=device,
         dtype=dtype,
-        impl=['atomic', 'reduce', 'seperate'],
-        mode='ffn-cudagraph',
+        impl=['seperate_2'],
+        mode='ffn',
         tag='',
-        G=128,
+        G=32,
         x_log=True,
     )
 

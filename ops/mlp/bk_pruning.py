@@ -75,6 +75,7 @@ class BKSparseMLPKernel(_PruningMLPKernel):
         activation: Optional[str]='identity',
         estimated_sparsity: Optional[float]=0,
         prefill_impl: Optional[str]='auto',
+        enable_autotune: Optional[bool]=False,
         **kwargs,
     ):
         assert x.dim() == 3
@@ -87,6 +88,7 @@ class BKSparseMLPKernel(_PruningMLPKernel):
             activation=activation,
             estimated_sparsity=estimated_sparsity,
             impl=prefill_impl,
+            enable_autotune=enable_autotune,
             **kwargs,
         )
     

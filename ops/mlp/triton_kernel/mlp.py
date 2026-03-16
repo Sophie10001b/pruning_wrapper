@@ -25,6 +25,7 @@ def bm_sort_impl(
     N: tl.int64,
     K: tl.int64,
     HAS_BIAS: tl.constexpr,
+    ACTIVATION: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
@@ -89,6 +90,11 @@ def bm_sort_impl(
         if HAS_BIAS:
             acc += (tl.load(b + bn_offset, mask=bn_offset < N, other=0).to(tl.float32))[None, :]
         
+        if ACTIVATION == 'silu':
+            acc *= tl.sigmoid(acc)
+        if ACTIVATION == 'relu':
+            acc = tl.maximum(acc, 0)
+        
         tl.store(
             out + bm_indices[:, None] * N + bn_offset[None, :],
             acc.to(x.dtype.element_ty),
@@ -107,6 +113,7 @@ def bn_sort_impl(
     K: tl.constexpr,
     G_iter: tl.constexpr,
     HAS_BIAS: tl.constexpr,
+    ACTIVATION: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
@@ -170,6 +177,11 @@ def bn_sort_impl(
         
         if HAS_BIAS:
             acc += (tl.load(b + bn_offset, mask=bn_offset < N, other=0).to(tl.float32))[None, :]
+        
+        if ACTIVATION == 'silu':
+            acc *= tl.sigmoid(acc)
+        if ACTIVATION == 'relu':
+            acc = tl.maximum(acc, 0)
         
         tl.store(
             out + bm_indices[:, None] * N + bn_offset[None, :],
@@ -302,6 +314,7 @@ class BMSparseMLP:
         route_mask: torch.Tensor,
         w: torch.Tensor,
         b: Optional[torch.Tensor]=None,
+        activation: Optional[str]='identity',
         BLOCK_M: Optional[int]=64,
         BLOCK_N: Optional[int]=32,
         BLOCK_K: Optional[int]=32,
@@ -355,6 +368,7 @@ class BMSparseMLP:
             w, b, out,
             M, N, K,
             HAS_BIAS=b is not None,
+            ACTIVATION=activation,
             IS_OFFLINE=kwargs.get('is_offline', False),
         )
 
@@ -483,6 +497,7 @@ class BNSparseMLP:
         route_mask: torch.Tensor,
         w: torch.Tensor,
         b: Optional[torch.Tensor]=None,
+        activation: Optional[str]='identity',
         BLOCK_M: Optional[int]=64,
         BLOCK_N: Optional[int]=32,
         BLOCK_K: Optional[int]=32,
@@ -520,7 +535,7 @@ class BNSparseMLP:
         grid = lambda meta: (triton.cdiv(M, meta['BLOCK_M']), NG, G_iter)
 
         config = get_autotune_config(
-            params=['BLOCK_M', 'BLOCK_K', 'GROUP_SIZE', 'num_stages'],
+            params=['BLOCK_M', 'BLOCK_N', 'BLOCK_K', 'GROUP_SIZE', 'num_stages'],
             BLOCK_M=BLOCK_M,
             BLOCK_N=BLOCK_N,
             BLOCK_K=BLOCK_K,
@@ -539,6 +554,7 @@ class BNSparseMLP:
             w, b, out,
             M, N, K,
             HAS_BIAS=b is not None,
+            ACTIVATION=activation,
             G_iter=G_iter,
             IS_OFFLINE=kwargs.get('is_offline', False),
         )
@@ -705,7 +721,7 @@ class BKSparseMLP:
         grid = lambda meta: (triton.cdiv(M, meta['BLOCK_M']), triton.cdiv(N, meta['BLOCK_N']), NG)
 
         config = get_autotune_config(
-            params=['BLOCK_M', 'BLOCK_N', 'GROUP_SIZE', 'num_stages'],
+            params=['BLOCK_M', 'BLOCK_N', 'BLOCK_K', 'GROUP_SIZE', 'num_stages'],
             BLOCK_M=BLOCK_M,
             BLOCK_N=BLOCK_N,
             BLOCK_K=BLOCK_K,
@@ -818,5 +834,9 @@ class BKSparseMLP:
             num_stages=num_stages,
             num_warps=num_warps,
             route_mask=route_mask,
+            is_offline=is_offline,
+            BLOCK_M_list=[16, 32, 64, 128],
+            BLOCK_N_list=[32, 64, 128],
+            num_stages_list=[2, 3],
             **kwargs
         )

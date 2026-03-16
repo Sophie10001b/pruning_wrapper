@@ -115,14 +115,15 @@ class QuerySparseAttentionKernel(_PruningAttentionKernel):
         estimated_sparsity: Optional[float]=0,
         prefill_impl: Optional[str]='sort',
         decode_impl: Optional[str]='split',
+        enable_autotune: Optional[bool]=False,
         **kwargs,
     ):
         assert k.dim() == 4 and q.dim() == 4
         if route_mask.shape[1] > 1:
-            return cls.base_prefill(q, k, v, route_mask, pad_offset, estimated_sparsity=estimated_sparsity, impl=prefill_impl)
+            return cls.base_prefill(q, k, v, route_mask, pad_offset, estimated_sparsity=estimated_sparsity, impl=prefill_impl, enable_autotune=enable_autotune)
         else:
             assert k.dim() == 4 and q.dim() == 4
-            return cls.base_decode(q, k, v, route_mask, pad_offset, impl=decode_impl)
+            return cls.base_decode(q, k, v, route_mask, pad_offset, impl=decode_impl, enable_autotune=enable_autotune)
     
     def _ref_forward(
         self,

@@ -18,7 +18,7 @@ def blasst_impl(
     v: tl.tensor,
     pad_offset: tl.tensor, # [B]
     execute_block: tl.tensor, # Optional [LK // BLOCK_N]
-    out: tl.tensor, # [B, 1, HQ, splitk, D]
+    out: tl.tensor, # [B, 1, HQ, D] or [B, 1, HQ, splitk, D]
     metadata: tl.tensor, # Optional [B, 1, HQ, 2, splitk]
     LK: tl.int64,
     LBK: tl.int64, # size of each split k block, set to 0 if no split
@@ -296,6 +296,6 @@ class PVSparseDecode:
             num_warps=num_warps,
             pad_offset=pad_offset,
             BLOCK_N_list=[16, 32, 64],
-            num_stages_list=[2,3],
+            num_stages_list=[2, 3],
             **kwargs
         )

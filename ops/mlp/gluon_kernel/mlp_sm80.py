@@ -37,6 +37,7 @@ def issue_load_AB(
     mB: gl.tensor,
     sA: gl.shared_memory_descriptor,
     sB: gl.shared_memory_descriptor,
+    nk_layout: gl.constexpr,
     n_base,
     mA_idx: gl.tensor,
     M: gl.int64,
@@ -47,13 +48,13 @@ def issue_load_AB(
     num_stages: gl.constexpr,
 ):
     index = producer % num_stages
-    k_range = producer * BLOCK_K + gl.arange(BLOCK_K)[:, None]
+    k_base = producer * BLOCK_K
 
     mA_mask = (mA_idx < M)[:, None]
-    mB_mask = (n_base + gl.arange(BLOCK_N) < N)[None, :]
+    mB_mask = (n_base + gl.arange(0, BLOCK_N) < N)[:, None]
 
-    async_copy.async_copy_global_to_shared(sA.index(index), mA + mA_idx[:, None] * K + k_range, mask=mA_mask)
-    async_copy.async_copy_global_to_shared(sB.index(index), mB + (n_base + gl.arange(BLOCK_N))[:, None] * K + k_range, mask=mB_mask)
+    async_copy.async_copy_global_to_shared(sA.index(index), mA + mA_idx[:, None] * K + k_base + gl.arange(0, BLOCK_K)[None, :], mask=mA_mask)
+    async_copy.async_copy_global_to_shared(sB.index(index), mB + (n_base + gl.arange(0, BLOCK_N, layout=nk_layout))[:, None] * K + k_base + gl.arange(0, BLOCK_K)[None, :], mask=mB_mask)
     async_copy.commit_group()
 
     return producer + 1
@@ -103,7 +104,7 @@ def bm_sort_sm80_impl(
 
     bidx, bidy = swizzle_l2(bidx, bidy, bdimx, bdimy, GROUP_SIZE)
 
-    dtype: gl.constexpr = mA.dtype
+    dtype: gl.constexpr = mA.dtype.element_ty
     sA = gl.allocate_shared_memory(dtype, [num_stages, BLOCK_M, BLOCK_K], sA_layout)
     sB = gl.allocate_shared_memory(dtype, [num_stages, BLOCK_N, BLOCK_K], sB_layout)
     
@@ -123,17 +124,18 @@ def bm_sort_sm80_impl(
     rA_layout: gl.constexpr = gl.DotOperandLayout(
         operand_index=0,
         parent=rD_layout,
-        k_width=32 // dtype.primitive_bitwidth,
+        k_width=32 // 2,
     )
     rB_layout: gl.constexpr = gl.DotOperandLayout(
         operand_index=1,
         parent=rD_layout,
-        k_width=32 // dtype.primitive_bitwidth,
+        k_width=32 // 2,
     )
     rD = gl.zeros([BLOCK_M, BLOCK_N], gl.float32, layout=rD_layout)
 
     # issue mask & index
-    indices_layout: gl.constexpr = gl.SliceLayout(1, gl.BlockedLayout([1, 1], [1, 32], [num_warps, 1], [1, 0]))
+    mn_layout: gl.constexpr = gl.BlockedLayout([1, 8], [32 // (BLOCK_K // 8), BLOCK_K // 8], [num_warps, 1], [1, 0])
+    indices_layout: gl.constexpr = gl.SliceLayout(1, mn_layout)
 
     if IS_OFFLINE:
         rSkip = gl.load(route_mask + bidx)
@@ -159,11 +161,13 @@ def bm_sort_sm80_impl(
                 other=M,
             )
 
+        nk_layout: gl.constexpr = gl.SliceLayout(1, mn_layout)
         # prologue, issues first pipe - 1 loading
         for k in gl.static_range(0, num_stages - 1):
             producer = issue_load_AB(
                 producer,
                 mA, mB, sA, sB,
+                nk_layout,
                 n_base, rIndices,
                 M, N, K,
                 BLOCK_N, BLOCK_K, num_stages,
@@ -174,6 +178,7 @@ def bm_sort_sm80_impl(
             producer = issue_load_AB(
                 producer,
                 mA, mB, sA, sB,
+                nk_layout,
                 n_base, rIndices,
                 M, N, K,
                 BLOCK_N, BLOCK_K, num_stages,
@@ -188,7 +193,7 @@ def bm_sort_sm80_impl(
         
         # final (num_stages - 1) mma
         for k in gl.static_range(0, num_stages - 1):
-            async_copy.wait_group(num_stages - 2 - i)
+            async_copy.wait_group(num_stages - 2 - k)
             consumer, rD = issue_mma(
                 consumer,
                 sA, sB,
@@ -200,10 +205,10 @@ def bm_sort_sm80_impl(
         # sD.store(rD.to(dtype))
         # rD_new = sD.load(mn_layout)
 
-        mn_r2g_layout: gl.constexpr = gl.BlockedLayout([1, 8], [32 // (BLOCK_K // 8), BLOCK_K // 8], [num_warps, 1], [1, 0])
-        rIndices = gl.convert_layout(rIndices, gl.SliceLayout(1, mn_r2g_layout), assert_trivial=False)
+        # mn_r2g_layout: gl.constexpr = gl.BlockedLayout([1, 8], [32 // (BLOCK_K // 8), BLOCK_K // 8], [num_warps, 1], [1, 0])
+        # rIndices = gl.convert_layout(rIndices, gl.SliceLayout(1, mn_r2g_layout), assert_trivial=False)
 
-        rD_new = gl.convert_layout(rD, mn_r2g_layout, assert_trivial=False)
+        rD_new = gl.convert_layout(rD, mn_layout, assert_trivial=False)
         gl.store(
             mD + rIndices[:, None] * N + n_base + gl.arange(0, BLOCK_N)[None, :],
             rD_new,
@@ -256,15 +261,9 @@ class BMSparseMLP:
         out = torch.zeros((M, N), dtype=x.dtype, device=x.device)
         grid = lambda meta: (triton.cdiv(M, meta['BLOCK_M']), triton.cdiv(N, meta['BLOCK_N']))
 
-        # tma descriptor
         gl_dtype = getattr(gl, str(x_flat.dtype).split('.')[1])
-        A_desc_layout = gl.NVMMASharedLayout.get_default_for([BLOCK_M, BLOCK_K], gl_dtype)
-        B_desc_layout = gl.NVMMASharedLayout.get_default_for([BLOCK_N, BLOCK_K], gl_dtype)
-        # D_desc_layout = gl.NVMMASharedLayout.get_default_for([BLOCK_M, BLOCK_N], gl_dtype)
-
-        A_desc = TensorDescriptor.from_tensor(x_flat, [1, BLOCK_K], A_desc_layout)
-        B_desc = TensorDescriptor.from_tensor(w, [BLOCK_N, BLOCK_K], B_desc_layout)
-        # D_desc = TensorDescriptor.from_tensor(out, [1, BLOCK_N], D_desc_layout)
+        sA_layout = gl.NVMMASharedLayout.get_default_for([BLOCK_M, BLOCK_K], gl_dtype)
+        sB_layout = gl.NVMMASharedLayout.get_default_for([BLOCK_N, BLOCK_K], gl_dtype)
 
         config = get_autotune_config(
             params=['GROUP_SIZE', 'num_stages'],
@@ -280,9 +279,10 @@ class BMSparseMLP:
             is_gluon=True
         )
         kernel[grid](
-            A_desc, B_desc, out,
+            x_flat, w, out,
             m_sort, m_sort_indices.to(torch.uint32),
             M, N, K,
+            sA_layout, sB_layout,
             BLOCK_M=BLOCK_M,
             BLOCK_N=BLOCK_N,
             BLOCK_K=BLOCK_K,
@@ -338,7 +338,7 @@ class BMSparseMLP:
         
         if impl == 'auto': # auto dispatch
             if route_mask is None: impl = 'dense'
-            else: impl = 'sort_offline'
+            else: impl = 'sort_online'
 
         if impl in ['sort_offline', 'sort_online']:
             BLOCK_M = triton.next_power_of_2(int(M * estimated_sparsity))

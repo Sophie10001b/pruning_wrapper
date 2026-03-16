@@ -112,19 +112,20 @@ class PVSparseAttentionKernel(_PruningAttentionKernel):
         k: torch.Tensor,
         v: torch.Tensor,
         threshold: float,
+        block_size: Optional[int]=128,
         pad_offset: Optional[torch.Tensor]=None,
         execute_block: Optional[torch.Tensor]=None,
         prefill_impl: Optional[str]='blasst',
         decode_impl: Optional[str]='blasst',
-        enable_autotune: Optional[bool]=True,
+        enable_autotune: Optional[bool]=False,
         **kwargs,
     ):
         assert k.dim() == 4 and q.dim() == 4
         if q.shape[1] > 1:
-            return cls.base_prefill(q, k, v, threshold, pad_offset, execute_block, impl=prefill_impl, enable_autotune=enable_autotune)
+            return cls.base_prefill(q, k, v, threshold, pad_offset, execute_block, block_size=block_size, impl=prefill_impl, enable_autotune=enable_autotune)
         else:
             assert k.dim() == 4 and q.dim() == 4
-            return cls.base_decode(q, k, v, threshold, pad_offset, execute_block, impl=decode_impl, enable_autotune=enable_autotune)
+            return cls.base_decode(q, k, v, threshold, pad_offset, execute_block, block_size=block_size, impl=decode_impl, enable_autotune=enable_autotune)
     
     def _ref_forward(
         self,
