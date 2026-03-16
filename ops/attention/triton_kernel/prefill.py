@@ -13,7 +13,7 @@ from ops.utils import get_autotune_config, get_autotune_cache
 # Kernel Implementation
 #########################
 
-def query_sort_impl(
+def query_sort_prefill_impl(
     q: tl.tensor,
     k: tl.tensor,
     v: tl.tensor,
@@ -119,7 +119,7 @@ def query_sort_impl(
         )
 
 
-def query_group_sort_impl(
+def query_group_sort_prefill_impl(
     q: tl.tensor,
     k: tl.tensor,
     v: tl.tensor,
@@ -225,7 +225,7 @@ def query_group_sort_impl(
             mask=query_range_mask[:, None],
         )
     
-def query_head_sort_impl(
+def query_head_sort_prefill_impl(
     q: tl.tensor,
     k: tl.tensor,
     v: tl.tensor,
@@ -378,7 +378,7 @@ class QuerySparsePrefill:
             **kwargs,
         )
         kernel = get_autotune_cache(
-            query_sort_impl,
+            query_sort_prefill_impl,
             enable_autotune=True,
             config=config,
             keys=['LQ', 'LK'],
@@ -388,10 +388,6 @@ class QuerySparsePrefill:
             q, k, v,
             m_sort, m_sort_indices, pad_offset, out,
             LQ, LK, HQ, HK, D, G, D**-0.5,
-            BLOCK_M=BLOCK_M,
-            BLOCK_N=BLOCK_N,
-            num_stages=num_stages,
-            num_warps=num_warps,
             IS_OFFLINE=kwargs.get('is_offline', False),
         )
         return out
@@ -514,7 +510,7 @@ class GroupSparsePrefill:
             **kwargs,
         )
         kernel = get_autotune_cache(
-            query_group_sort_impl,
+            query_group_sort_prefill_impl,
             enable_autotune=True,
             config=config,
             keys=['LQ', 'LK'],
@@ -524,10 +520,6 @@ class GroupSparsePrefill:
             q, k, v,
             m_sort, m_sort_indices, pad_offset, out,
             LQ, LK, HQ, HK, D, G, D**-0.5,
-            BLOCK_M=BLOCK_M,
-            BLOCK_N=BLOCK_N,
-            num_stages=num_stages,
-            num_warps=num_warps,
             IS_OFFLINE=kwargs.get('is_offline', False),
         )
         return out
@@ -652,7 +644,7 @@ class HeadSparsePrefill:
             **kwargs,
         )
         kernel = get_autotune_cache(
-            query_head_sort_impl,
+            query_head_sort_prefill_impl,
             enable_autotune=True,
             config=config,
             keys=['LQ', 'LK'],
@@ -662,10 +654,6 @@ class HeadSparsePrefill:
             q, k, v,
             m_sort, m_sort_indices, pad_offset, out,
             LQ, LK, HQ, HK, D, G, D**-0.5,
-            BLOCK_M=BLOCK_M,
-            BLOCK_N=BLOCK_N,
-            num_stages=num_stages,
-            num_warps=num_warps,
             IS_OFFLINE=kwargs.get('is_offline', False),
         )
         return out

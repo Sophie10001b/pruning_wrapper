@@ -13,7 +13,7 @@ from ops.utils import get_autotune_config, get_autotune_cache
 # Kernel Implementation
 #########################
 
-def query_sort_impl(
+def query_sort_decode_impl(
     q: tl.tensor,
     k: tl.tensor,
     v: tl.tensor,
@@ -105,7 +105,7 @@ def query_sort_impl(
             )
 
 
-def query_group_sort_impl(
+def query_group_sort_decode_impl(
     q: tl.tensor,
     k: tl.tensor,
     v: tl.tensor,
@@ -197,7 +197,7 @@ def query_group_sort_impl(
             )
 
 
-def query_head_sort_impl(
+def query_head_sort_decode_impl(
     q: tl.tensor,
     k: tl.tensor,
     v: tl.tensor,
@@ -214,7 +214,6 @@ def query_head_sort_impl(
     NBK: tl.int64, # num of split k for each seq
     qk_scale: tl.float32,
     kv_split: tl.constexpr, # whether to using flash decoding
-    BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
 ):
     split_id, query_head_id, batch_id = tl.program_id(0), tl.program_id(1), tl.program_id(2)
@@ -281,7 +280,7 @@ def query_head_sort_impl(
                 score_sum.to(metadata.dtype.element_ty),
             )
 
-
+@triton.jit(do_not_specialize=['NBK'])
 def merge_impl(
     out_tmp: tl.tensor, # [B, 1, HQ, splitk, D]
     metadata: tl.tensor, # [B, 1, HQ, 2, splitk] for local max and local sum
@@ -305,7 +304,7 @@ def merge_impl(
         route_offset = batch_id * HK + key_head_id
     
     if sparse_type == 'head':
-        route_offset = batch_id * HQ + key_head_id
+        route_offset = batch_id * HQ + query_head_id
 
     NBK_mask = tl.arange(0, NBK2) < NBK
     is_active = tl.load(route_mask + route_offset)
@@ -384,7 +383,7 @@ class QuerySparseDecode:
             **kwargs,
         )
         kernel = get_autotune_cache(
-            query_sort_impl,
+            query_sort_decode_impl,
             enable_autotune=True,
             config=config,
             keys=['LK'],
@@ -403,21 +402,14 @@ class QuerySparseDecode:
             out_local = torch.zeros((B, LQ, HQ, num_split, D), dtype=torch.float32, device=q.device)
             metadata = torch.zeros((B, LQ, HQ, 2, num_split), dtype=torch.float32, device=q.device)
 
-            merge_kernel = get_autotune_cache(
-                merge_impl,
-                enable_autotune=True,
-                config=[],
-                keys=[],
-                do_not_specialize=['NBK', 'NBK2'],
-            )
             kernel[grid](
                 q, k, v,
                 route_mask, pad_offset, out_local, metadata,
                 LK, split_size, HQ, HK, D, G, num_split, D**-0.5,
-                kv_split=False,
+                kv_split=True,
             )
             grid = lambda meta: (HQ, B)
-            merge_kernel[grid](
+            merge_impl[grid](
                 out_local, metadata,
                 route_mask, out,
                 HQ, HK, D, G, num_split, triton.next_power_of_2(num_split),
@@ -484,7 +476,7 @@ class QuerySparseDecode:
         return getattr(cls, f"_sort_kernel")(
             BLOCK_M=BLOCK_M,
             BLOCK_N=BLOCK_N,
-            split_size=split_size if impl == 'split' else 0,
+            split_size=split_size if impl == 'split' and num_split > 1 else 0,
             num_split=num_split if impl == 'split' else 1,
             num_stages=num_stages,
             num_warps=num_warps,
@@ -539,7 +531,7 @@ class GroupSparseDecode:
             **kwargs,
         )
         kernel = get_autotune_cache(
-            query_group_sort_impl,
+            query_group_sort_decode_impl,
             enable_autotune=True,
             config=config,
             keys=['LK'],
@@ -558,21 +550,14 @@ class GroupSparseDecode:
             out_local = torch.zeros((B, LQ, HQ, num_split, D), dtype=torch.float32, device=q.device)
             metadata = torch.zeros((B, LQ, HQ, 2, num_split), dtype=torch.float32, device=q.device)
 
-            merge_kernel = get_autotune_cache(
-                merge_impl,
-                enable_autotune=True,
-                config=[],
-                keys=[],
-                do_not_specialize=['NBK', 'NBK2'],
-            )
             kernel[grid](
                 q, k, v,
                 route_mask, pad_offset, out_local, metadata,
                 LK, split_size, HQ, HK, D, G, num_split, D**-0.5,
-                kv_split=False,
+                kv_split=True,
             )
             grid = lambda meta: (HQ, B)
-            merge_kernel[grid](
+            merge_impl[grid](
                 out_local, metadata,
                 route_mask, out,
                 HQ, HK, D, G, num_split, triton.next_power_of_2(num_split),
@@ -640,7 +625,7 @@ class GroupSparseDecode:
         return getattr(cls, f"_sort_kernel")(
             BLOCK_M=BLOCK_M,
             BLOCK_N=BLOCK_N,
-            split_size=split_size if impl == 'split' else 0,
+            split_size=split_size if impl == 'split' and num_split > 1 else 0,
             num_split=num_split if impl == 'split' else 1,
             num_stages=num_stages,
             num_warps=num_warps,
@@ -697,7 +682,7 @@ class HeadSparseDecode:
             **kwargs,
         )
         kernel = get_autotune_cache(
-            query_head_sort_impl,
+            query_head_sort_decode_impl,
             enable_autotune=True,
             config=config,
             keys=['LK'],
@@ -716,21 +701,14 @@ class HeadSparseDecode:
             out_local = torch.zeros((B, LQ, HQ, num_split, D), dtype=torch.float32, device=q.device)
             metadata = torch.zeros((B, LQ, HQ, 2, num_split), dtype=torch.float32, device=q.device)
 
-            merge_kernel = get_autotune_cache(
-                merge_impl,
-                enable_autotune=True,
-                config=[],
-                keys=[],
-                do_not_specialize=['NBK', 'NBK2'],
-            )
             kernel[grid](
                 q, k, v,
                 route_mask, pad_offset, out_local, metadata,
                 LK, split_size, HQ, HK, D, G, num_split, D**-0.5,
-                kv_split=False,
+                kv_split=True,
             )
             grid = lambda meta: (HQ, B)
-            merge_kernel[grid](
+            merge_impl[grid](
                 out_local, metadata,
                 route_mask, out,
                 HQ, HK, D, G, num_split, triton.next_power_of_2(num_split),
@@ -795,7 +773,7 @@ class HeadSparseDecode:
         split_size = triton.cdiv(LK, num_split)
         return getattr(cls, f"_sort_kernel")(
             BLOCK_N=BLOCK_N,
-            split_size=split_size if impl == 'split' else 0,
+            split_size=split_size if impl == 'split' and num_split > 1 else 0,
             num_split=num_split if impl == 'split' else 1,
             num_stages=num_stages,
             num_warps=num_warps,

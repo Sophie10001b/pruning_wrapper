@@ -12,7 +12,7 @@ from ops.utils import get_autotune_config, get_autotune_cache
 # Sparse Attention (Online skip PV based on local metrics)
 ##############################################################
 
-def blasst_impl(
+def blasst_prefill_impl(
     q: tl.tensor,
     k: tl.tensor,
     v: tl.tensor,
@@ -139,7 +139,7 @@ class PVSparsePrefill:
             **kwargs,
         )
         kernel = get_autotune_cache(
-            blasst_impl,
+            blasst_prefill_impl,
             enable_autotune=True,
             config=config,
             keys=['LQ', 'LK', 'HQ', 'HK', 'D'],

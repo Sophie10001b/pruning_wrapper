@@ -13,7 +13,7 @@ from triton.testing import do_bench, do_bench_cudagraph
 from .base import _PruningMLPKernel, DenseMLPKernel, ACT2FUNC
 from .triton_kernel.mlp import BNSparseMLP, BKSparseMLP
 from .triton_kernel.glu import BNSparseGLU
-from .triton_kernel.ffn import BNSparseGLUBKSparseMLP
+from .triton_kernel.ffn import BNSparseFFN
 
 os.environ['TRITON_PRINT_AUTOTUNING']='0'
 os.environ['CUDA_LAUNCH_BLOCKING']='0'
@@ -135,7 +135,7 @@ class BNSparseMLPKernel(_PruningMLPKernel):
                     **meta,
                 )
             else:
-                res, meta = BNSparseGLUBKSparseMLP.kernel(
+                res, meta = BNSparseFFN.kernel(
                     x=x,
                     route_mask=route_mask,
                     wu=w_up,

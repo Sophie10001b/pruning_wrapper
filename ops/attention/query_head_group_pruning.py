@@ -114,8 +114,8 @@ class GroupSparseAttentionKernel(_PruningAttentionKernel):
         route_mask: Optional[torch.Tensor]=None,
         pad_offset: Optional[torch.Tensor]=None,
         estimated_sparsity: Optional[float]=0,
-        prefill_impl: Optional[str]='dense',
-        decode_impl: Optional[str]='split',
+        prefill_impl: Optional[str]='auto',
+        decode_impl: Optional[str]='auto',
         enable_autotune: Optional[bool]=False,
         **kwargs,
     ):
@@ -135,7 +135,7 @@ class GroupSparseAttentionKernel(_PruningAttentionKernel):
         pad_offset: Optional[torch.Tensor]=None,
         route_mask: Optional[torch.Tensor]=None,
     ):
-        o = DenseAttentionKernel.forward(q, k, v, attention_mask, pad_offset)
+        o = DenseAttentionKernel.forward(q, k, v, None, attention_mask, pad_offset)
         if route_mask is not None:
             o = rearrange(o, 'b l (hk g) d -> b l hk g d', hk=k.shape[2])
             o.masked_fill_(route_mask.logical_not()[:, :, :, None, None], 0)
@@ -173,7 +173,7 @@ class GroupSparseAttentionKernel(_PruningAttentionKernel):
                 pad_offset = seqlen_kv - attention_mask.sum(-1)
 
                 ref_out = self._ref_forward(deepcopy(q), deepcopy(k), deepcopy(v), attention_mask, pad_offset, route_mask)
-                out = self.forward(deepcopy(q), deepcopy(k), deepcopy(v), route_mask, pad_offset, estimated_sparsity=sparsity, prefill_impl='sort_offline')
+                out = self.forward(deepcopy(q), deepcopy(k), deepcopy(v), route_mask, pad_offset, estimated_sparsity=sparsity)
 
                 diff = torch.abs(out - ref_out)
                 mean_diff = diff.mean().item()

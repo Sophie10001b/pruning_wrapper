@@ -14,7 +14,7 @@ from ops.utils import get_autotune_config, get_autotune_cache
 # Kernel Implementation
 #########################
 
-def bm_sort_impl(
+def bm_sort_ffn_impl(
     x: tl.tensor, # [M, K]
     route_mask: tl.tensor, # [M] or [cdiv(M, BLOCK_M)]
     route_indices: tl.tensor, # [M]
@@ -132,7 +132,7 @@ def bm_sort_impl(
             bk_offset += BLOCK_K
 
 
-def bn_sort_impl(
+def bn_sort_ffn_impl(
     x: tl.tensor, # [M, K]
     route_mask: tl.tensor, # [NG, M] or [NG, cdiv(M, BLOCK_M)]
     route_indices: tl.tensor, # [NG, M]
@@ -273,12 +273,12 @@ class BMSparseFFN:
         wd: torch.Tensor,
         bu: Optional[torch.Tensor]=None,
         bg: Optional[torch.Tensor]=None,
-        activation: Optional[str]='identity',
         **kwargs
     ):
         # GLU
         out_up = torch.nn.functional.linear(x, wu, bu)
         out_gate = torch.nn.functional.linear(x, wg, bg)
+        activation = kwargs.get('activation', 'identity')
         if activation == 'silu':
             out_gate = out_gate * torch.sigmoid(out_gate)
         elif activation == 'relu':
@@ -299,7 +299,6 @@ class BMSparseFFN:
         wd: torch.Tensor,
         bu: Optional[torch.Tensor]=None,
         bg: Optional[torch.Tensor]=None,
-        activation: Optional[str]='identity',
         BLOCK_M: Optional[int]=64,
         BLOCK_N: Optional[int]=32,
         BLOCK_K: Optional[int]=32,
@@ -343,7 +342,7 @@ class BMSparseFFN:
             **kwargs,
         )
         kernel = get_autotune_cache(
-            bm_sort_impl,
+            bm_sort_ffn_impl,
             enable_autotune=True,
             config=config,
             keys=['M', 'N', 'K'],
@@ -354,7 +353,7 @@ class BMSparseFFN:
             M, N, K,
             HAS_BIAS_UP=bu is not None,
             HAS_BIAS_GATE=bg is not None,
-            ACTIVATION=activation,
+            ACTIVATION=kwargs.get('activation', 'identity'),
             IS_OFFLINE=kwargs.get('is_offline', False),
         )
 
@@ -477,12 +476,12 @@ class BNSparseFFN:
         wd: torch.Tensor,
         bu: Optional[torch.Tensor]=None,
         bg: Optional[torch.Tensor]=None,
-        activation: Optional[str]='identity',
         **kwargs
     ):
         # GLU
         out_up = torch.nn.functional.linear(x, wu, bu)
         out_gate = torch.nn.functional.linear(x, wg, bg)
+        activation = kwargs.get('activation', 'identity')
         if activation == 'silu':
             out_gate = out_gate * torch.sigmoid(out_gate)
         elif activation == 'relu':
@@ -504,7 +503,6 @@ class BNSparseFFN:
         wd: torch.Tensor,
         bu: Optional[torch.Tensor]=None,
         bg: Optional[torch.Tensor]=None,
-        activation: Optional[str]='identity',
         BLOCK_M: Optional[int]=64,
         BLOCK_N: Optional[int]=32,
         BLOCK_K: Optional[int]=32,
@@ -551,7 +549,7 @@ class BNSparseFFN:
             **kwargs,
         )
         kernel = get_autotune_cache(
-            bn_sort_impl,
+            bn_sort_ffn_impl,
             enable_autotune=True,
             config=config,
             keys=['M', 'N', 'K'],
@@ -562,7 +560,7 @@ class BNSparseFFN:
             M, N, K,
             HAS_BIAS_UP=bu is not None,
             HAS_BIAS_GATE=bg is not None,
-            ACTIVATION=activation,
+            ACTIVATION=kwargs.get('activation', 'identity'),
             G_iter=G_iter,
             IS_OFFLINE=kwargs.get('is_offline', False),
         )

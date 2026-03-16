@@ -13,7 +13,7 @@ from triton.testing import do_bench, do_bench_cudagraph
 from .base import _PruningMLPKernel, DenseMLPKernel, ACT2FUNC
 from .triton_kernel.mlp import BMSparseMLP
 from .triton_kernel.glu import BMSparseGLU
-from .triton_kernel.ffn import BMSparseGLUBMSparseMLP
+from .triton_kernel.ffn import BMSparseFFN
 
 # from .gluon_kernel.mlp import BMSparseMLP
 
@@ -136,7 +136,7 @@ class BMSparseMLPKernel(_PruningMLPKernel):
                     **meta,
                 )
             else:
-                res, meta = BMSparseGLUBMSparseMLP.kernel(
+                res, meta = BMSparseFFN.kernel(
                     x=x,
                     route_mask=route_mask,
                     wu=w_up,

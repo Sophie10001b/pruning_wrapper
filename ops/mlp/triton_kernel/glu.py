@@ -14,7 +14,7 @@ from ops.utils import get_autotune_config, get_autotune_cache
 # Kernel Implementation
 #########################
 
-def bm_sort_impl(
+def bm_sort_glu_impl(
     x: tl.tensor, # [M, K]
     route_mask: tl.tensor, # [M] or [cdiv(M, BLOCK_M)]
     route_indices: tl.tensor, # [M]
@@ -116,7 +116,7 @@ def bm_sort_impl(
             mask=bm_mask[:, None] & (bn_offset < N)[None, :],
         )
 
-def bn_sort_impl(
+def bn_sort_glu_impl(
     x: tl.tensor, # [M, K]
     route_mask: tl.tensor, # [NG, M] or [NG, cdiv(M, BLOCK_M)]
     route_indices: tl.tensor, # [NG, M]
@@ -295,7 +295,6 @@ class BMSparseGLU:
         wg: torch.Tensor,
         bu: Optional[torch.Tensor]=None,
         bg: Optional[torch.Tensor]=None,
-        activation: Optional[str]='identity',
         BLOCK_M: Optional[int]=64,
         BLOCK_N: Optional[int]=32,
         BLOCK_K: Optional[int]=32,
@@ -339,7 +338,7 @@ class BMSparseGLU:
             **kwargs,
         )
         kernel = get_autotune_cache(
-            bm_sort_impl,
+            bm_sort_glu_impl,
             enable_autotune=True,
             config=config,
             keys=['M', 'N', 'K'],
@@ -350,7 +349,7 @@ class BMSparseGLU:
             M, N, K,
             HAS_BIAS_UP=bu is not None,
             HAS_BIAS_GATE=bg is not None,
-            ACTIVATION=activation,
+            ACTIVATION=kwargs.get('activation', 'identity'),
             IS_OFFLINE=kwargs.get('is_offline', False),
         )
 
@@ -492,7 +491,6 @@ class BNSparseGLU:
         wg: torch.Tensor,
         bu: Optional[torch.Tensor]=None,
         bg: Optional[torch.Tensor]=None,
-        activation: Optional[str]='identity',
         BLOCK_M: Optional[int]=64,
         BLOCK_N: Optional[int]=32,
         BLOCK_K: Optional[int]=32,
@@ -539,7 +537,7 @@ class BNSparseGLU:
             **kwargs,
         )
         kernel = get_autotune_cache(
-            bn_sort_impl,
+            bn_sort_glu_impl,
             enable_autotune=True,
             config=config,
             keys=['M', 'N', 'K'],
@@ -550,8 +548,8 @@ class BNSparseGLU:
             M, N, K,
             HAS_BIAS_UP=bu is not None,
             HAS_BIAS_GATE=bg is not None,
-            ACTIVATION=activation,
             G_iter=G_iter,
+            ACTIVATION=kwargs.get('activation', 'identity'),
             IS_OFFLINE=kwargs.get('is_offline', False),
         )
         return rearrange(out, '(B L) N -> B L N', B=B), dict(

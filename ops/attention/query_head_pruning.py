@@ -125,8 +125,8 @@ class HeadSparseAttentionKernel(_PruningAttentionKernel):
         route_mask: Optional[torch.Tensor]=None,
         pad_offset: Optional[torch.Tensor]=None,
         estimated_sparsity: Optional[float]=0,
-        prefill_impl: Optional[str]='dense',
-        decode_impl: Optional[str]='split',
+        prefill_impl: Optional[str]='auto',
+        decode_impl: Optional[str]='auto',
         enable_autotune: Optional[bool]=False,
         **kwargs,
     ):
@@ -146,7 +146,7 @@ class HeadSparseAttentionKernel(_PruningAttentionKernel):
         pad_offset: Optional[torch.Tensor]=None,
         route_mask: Optional[torch.Tensor]=None,
     ):
-        o = DenseAttentionKernel.forward(q, k, v, attention_mask, pad_offset)
+        o = DenseAttentionKernel.forward(q, k, v, None, attention_mask, pad_offset)
         if route_mask is not None: o.masked_fill_(route_mask.logical_not()[:, :, :, None], 0)
         return o
     
@@ -181,7 +181,7 @@ class HeadSparseAttentionKernel(_PruningAttentionKernel):
                 pad_offset = seqlen_kv - attention_mask.sum(-1)
 
                 ref_out = self._ref_forward(deepcopy(q), deepcopy(k), deepcopy(v), attention_mask, pad_offset, route_mask)
-                out = self.forward(deepcopy(q), deepcopy(k), deepcopy(v), route_mask, pad_offset, estimated_sparsity=sparsity, prefill_impl='sort')
+                out = self.forward(deepcopy(q), deepcopy(k), deepcopy(v), route_mask, pad_offset, estimated_sparsity=sparsity)
 
                 diff = torch.abs(out - ref_out)
                 mean_diff = diff.mean().item()

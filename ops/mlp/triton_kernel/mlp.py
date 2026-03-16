@@ -14,7 +14,7 @@ from ops.utils import get_autotune_config, get_autotune_cache
 # Kernel Implementation
 #########################
 
-def bm_sort_impl(
+def bm_sort_mlp_impl(
     x: tl.tensor, # [M, K]
     route_mask: tl.tensor, # [M] or [cdiv(M, BLOCK_M)]
     route_indices: tl.tensor, # [M]
@@ -101,7 +101,7 @@ def bm_sort_impl(
             mask=bm_mask[:, None] & (bn_offset < N)[None, :],
         )
 
-def bn_sort_impl(
+def bn_sort_mlp_impl(
     x: tl.tensor, # [M, K]
     route_mask: tl.tensor, # [NG, M] or [NG, cdiv(M, BLOCK_M)]
     route_indices: tl.tensor, # [NG, M]
@@ -189,7 +189,7 @@ def bn_sort_impl(
             mask=bm_mask[:, None] & (bn_offset < N)[None, :],
         )
 
-def bk_atomic_impl(
+def bk_atomic_mlp_impl(
     x: tl.tensor, # [M, K]
     route_mask: tl.tensor, # [NG, M] or [NG, cdiv(M, BLOCK_M)]
     route_indices: tl.tensor, # [NG, M]
@@ -314,7 +314,6 @@ class BMSparseMLP:
         route_mask: torch.Tensor,
         w: torch.Tensor,
         b: Optional[torch.Tensor]=None,
-        activation: Optional[str]='identity',
         BLOCK_M: Optional[int]=64,
         BLOCK_N: Optional[int]=32,
         BLOCK_K: Optional[int]=32,
@@ -358,7 +357,7 @@ class BMSparseMLP:
             **kwargs,
         )
         kernel = get_autotune_cache(
-            bm_sort_impl,
+            bm_sort_mlp_impl,
             enable_autotune=True,
             config=config,
             keys=['M', 'N', 'K'],
@@ -368,7 +367,7 @@ class BMSparseMLP:
             w, b, out,
             M, N, K,
             HAS_BIAS=b is not None,
-            ACTIVATION=activation,
+            ACTIVATION=kwargs.get('activation', 'identity'),
             IS_OFFLINE=kwargs.get('is_offline', False),
         )
 
@@ -497,7 +496,6 @@ class BNSparseMLP:
         route_mask: torch.Tensor,
         w: torch.Tensor,
         b: Optional[torch.Tensor]=None,
-        activation: Optional[str]='identity',
         BLOCK_M: Optional[int]=64,
         BLOCK_N: Optional[int]=32,
         BLOCK_K: Optional[int]=32,
@@ -544,7 +542,7 @@ class BNSparseMLP:
             **kwargs,
         )
         kernel = get_autotune_cache(
-            bn_sort_impl,
+            bn_sort_mlp_impl,
             enable_autotune=True,
             config=config,
             keys=['M', 'N', 'K'],
@@ -554,7 +552,7 @@ class BNSparseMLP:
             w, b, out,
             M, N, K,
             HAS_BIAS=b is not None,
-            ACTIVATION=activation,
+            ACTIVATION=kwargs.get('activation', 'identity'),
             G_iter=G_iter,
             IS_OFFLINE=kwargs.get('is_offline', False),
         )
@@ -730,7 +728,7 @@ class BKSparseMLP:
             **kwargs,
         )
         kernel = get_autotune_cache(
-            bk_atomic_impl,
+            bk_atomic_mlp_impl,
             enable_autotune=True,
             config=config,
             keys=['M', 'N', 'K'],
