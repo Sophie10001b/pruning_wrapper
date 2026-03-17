@@ -221,7 +221,7 @@ class PVSparseDecode:
                 enable_autotune=True,
                 config=[],
                 keys=[],
-                do_not_specialize=['NBK', 'NBK2'],
+                do_not_specialize=['NBK'],
             )
 
             kernel[grid](

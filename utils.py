@@ -8,11 +8,11 @@ def print_results(res_dict: Dict[Tuple[int, int], List[float]]):
         "Batch Size",
         "Seq Len",
         "Throughput (token/s)",
+        "Max Throughput (token/s)",
         "Min Throughput (token/s)",
-        "Max Throughput (token/s)"
     ])
 
     for (batch_size, seq_len), res in res_dict.items():
-        df.loc[len(df)] = [batch_size, seq_len, res[0], res[1], res[2]]
+        df.loc[len(df)] = [batch_size, seq_len, res[0], res[2], res[1]]
     
-    print(df.to_string())
+    return df.to_string()

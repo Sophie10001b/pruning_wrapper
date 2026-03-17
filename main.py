@@ -1,3 +1,4 @@
+import os
 import argparse
 import torch
 
@@ -94,7 +95,20 @@ def main():
                     res_dict[(batch_size, seq_len)] = [0, 0, 0]
         
         print(f'[INFO] Model: {args.model_name}, Config: {config_path}, {args.benchmark_metric} results:')
-        print_results(res_dict)
+        res_str = print_results(res_dict)
+        print(res_str)
+
+        # record to tmp txt, if exist then add to the end, if not exist then create
+        if not os.path.exists(f"{profiler_name}.txt"):
+            with open(f"{profiler_name}.txt", "w") as f:
+                f.write(f"Model: {args.model_name}, Config: {config_path}, {args.benchmark_metric} results:\n")
+                f.write(res_str)
+                f.write("\n")
+        else:
+            with open(f"{profiler_name}.txt", "a") as f:
+                f.write(f"Model: {args.model_name}, Config: {config_path}, {args.benchmark_metric} results:\n")
+                f.write(res_str)
+                f.write("\n")
 
 if __name__ == "__main__":
     main()

@@ -398,7 +398,7 @@ def merge_impl(
 
     NBK_mask = tl.arange(0, NBK2) < NBK
     is_active = 1
-    if route_offset > 0: is_active = tl.load(route_mask + route_offset)
+    if sparse_type != 'none': is_active = tl.load(route_mask + route_offset)
     split_range = tl.arange(0, NBK2)
     if is_active == 1:
         acc = tl.load(

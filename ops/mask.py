@@ -44,12 +44,14 @@ def search_for_alg_id(
     shape: Sequence[int],
     device: Optional[torch.device]=None,
     dtype: Optional[torch.dtype]=torch.float16,
+    m_size: Optional[int]=1024,
 ) -> Sequence[int]:
     A = rand_sparse_semi_structured(shape[0], shape[1], dtype, device)
-    B = torch.randn((1024, shape[1]), device=device, dtype=dtype)
+    B = torch.randn((m_size, shape[1]), device=device, dtype=dtype)
     A_compress = torch._cslt_compress(A)
 
     alg_id, split_k, split_k_mode, _ = torch._C._cusparselt.mm_search(A_compress, B.t(), None, None, None, False)
+    print(f"[INFO] spmm ALG_ID = {alg_id}, split_k = {split_k}, split_k_mode = {split_k_mode} for shape A{B.shape} @ B{A.shape}")
     return alg_id
 
 class SparseSemiStructuredTensorCUSPARSELT(SparseSemiStructuredTensor):

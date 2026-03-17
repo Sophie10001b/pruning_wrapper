@@ -461,7 +461,7 @@ class BMSparseMLP:
             route_mask=route_mask,
             is_offline=is_offline,
             BLOCK_M_list=[16, 32, 64, 128],
-            BLOCK_N_list=[32, 64, 128],
+            BLOCK_N_list=[64, 128],
             BLOCK_K_list=[32, 64],
             num_stages_list=[2, 3],
             **kwargs
@@ -835,7 +835,7 @@ class BKSparseMLP:
             route_mask=route_mask,
             is_offline=is_offline,
             BLOCK_M_list=[16, 32, 64, 128],
-            BLOCK_N_list=[32, 64, 128],
+            BLOCK_N_list=[64, 128],
             num_stages_list=[2, 3],
             **kwargs
         )
