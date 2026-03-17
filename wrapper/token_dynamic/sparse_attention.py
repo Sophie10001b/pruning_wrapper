@@ -39,8 +39,8 @@ class SparseAttention(PrunedAttention):
             if suffix == '': setattr(self, f'{prefix}_kwargs', self.pruning_config.get(prefix, {}))
             else: setattr(self, f'{suffix}_kwargs', self.pruning_config[prefix].get(suffix, {}))
 
-        self.attention_impl = __SPARSE_ATTENTION__[self.attention_kwargs.get('impl', 'base')]()
-        self.threshold_impl = __THRESHOLD__[self.attention_kwargs.get('impl', 'base')](**self.attention_kwargs)
+        self.attention_impl = __SPARSE_ATTENTION__[self.attention_kwargs.get('pruning_type', 'base')]()
+        self.threshold_impl = __THRESHOLD__[self.attention_kwargs.get('pruning_type', 'base')](**self.attention_kwargs)
         self.input_layernorm = input_layernorm
     
     def forward(

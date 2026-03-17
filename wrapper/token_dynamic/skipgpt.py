@@ -398,7 +398,7 @@ class SkipGPTDecoderLayer(nn.Module):
                     
             if estimated_sparsity >= 0: # generated benchmarking mask
                 for key in pruning_kwargs.keys():
-                    pruning_kwargs[key] = torch.rand_like(pruning_kwargs[key].float()) > estimated_sparsity
+                    pruning_kwargs[key] = torch.rand_like(pruning_kwargs[key].float()) > self.pruning_config[key].get('estimated_sparsity', estimated_sparsity)
 
         return pruning_kwargs
 

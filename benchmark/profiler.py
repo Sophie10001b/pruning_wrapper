@@ -107,6 +107,7 @@ class ModelProfiler:
             past_key_values=None,
             estimated_sparsity=kwargs.get('sparsity', 0.0),
             use_cuda_graph=cuda_graph,
+            kv_cache_len=seq_len,
         )
         
         device_interface = runtime.driver.active.get_device_interface()
@@ -217,6 +218,7 @@ class ModelProfiler:
             attention_mask=torch.ones_like(dummy_kv_cache, dtype=torch.bool),
             use_cache=True,
             estimated_sparsity=kwargs.get('sparsity', 0.0),
+            kv_cache_len=seq_len,
         )
         device_interface = runtime.driver.active.get_device_interface()
         device_cache = runtime.driver.active.get_empty_cache_for_benchmark()
@@ -349,6 +351,7 @@ class ModelProfiler:
             pad_offset=pad_offset,
             pruning_kwargs=pruning_kwargs,
             estimated_sparsity=kwargs.get('sparsity', 0.0),
+            kv_cache_len=seq_len,
         )
         
         layer(**model_inputs_kwargs)

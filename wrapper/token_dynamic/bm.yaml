@@ -22,7 +22,7 @@ attention:
   backend: triton
   prefill_impl: auto
   decode_impl: auto
-  enable_autotone: false
+  enable_autotune: false
 
   router:
     router_type: bottleneck
@@ -34,7 +34,7 @@ attention:
     backend: triton
     prefill_impl: auto
     decode_impl: auto
-    enable_autotone: false
+    enable_autotune: false
   
   k_proj:
     estimated_sparsity: 0.5
@@ -42,7 +42,7 @@ attention:
     backend: triton
     prefill_impl: auto
     decode_impl: auto
-    enable_autotone: false
+    enable_autotune: false
   
   v_proj:
     estimated_sparsity: 0.5
@@ -50,7 +50,7 @@ attention:
     backend: triton
     prefill_impl: auto
     decode_impl: auto
-    enable_autotone: false
+    enable_autotune: false
   
   o_proj:
     estimated_sparsity: 0.5
@@ -58,7 +58,7 @@ attention:
     backend: triton
     prefill_impl: auto
     decode_impl: auto
-    enable_autotone: false
+    enable_autotune: false
 
 # [base, bm, bn, bk]
 ffn:
@@ -68,7 +68,7 @@ ffn:
   backend: triton
   prefill_impl: auto
   decode_impl: auto
-  enable_autotone: false
+  enable_autotune: false
 
   router:
     router_type: bottleneck
@@ -82,7 +82,7 @@ ffn:
     backend: triton
     prefill_impl: auto
     decode_impl: auto
-    enable_autotone: false
+    enable_autotune: false
   
   gate_proj:
     block_size: 128
@@ -91,7 +91,7 @@ ffn:
     backend: triton
     prefill_impl: auto
     decode_impl: auto
-    enable_autotone: false
+    enable_autotune: false
   
   down_proj:
     block_size: 128
@@ -100,4 +100,4 @@ ffn:
     backend: triton
     prefill_impl: auto
     decode_impl: auto
-    enable_autotone: false
+    enable_autotune: false

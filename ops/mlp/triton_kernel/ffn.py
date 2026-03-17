@@ -346,6 +346,7 @@ class BMSparseFFN:
             enable_autotune=True,
             config=config,
             keys=['M', 'N', 'K'],
+            restored_kwargs=['out'],
         )
         kernel[grid](
             x_flat, m_sort, m_sort_indices,
@@ -553,6 +554,7 @@ class BNSparseFFN:
             enable_autotune=True,
             config=config,
             keys=['M', 'N', 'K'],
+            restored_kwargs=['out'],
         )
         kernel[grid](
             x_flat, m_sort, m_sort_indices,

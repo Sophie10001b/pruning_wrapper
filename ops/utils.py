@@ -49,20 +49,21 @@ class AutotuneMixin:
         config: Optional[List[triton.Config]]=[],
         keys: Optional[List[str]]=[],
         do_not_specialize: Optional[List[str]]=[],
+        restored_kwargs: Optional[List[str]]=[],
         is_gluon: Optional[bool]=False,
         **kwargs,
     ):
         def decorator(func):
             if is_gluon:
                 if enable_autotune:
-                    return triton.autotune(configs=config, key=keys)(
+                    return triton.autotune(configs=config, key=keys, restore_value=restored_kwargs)(
                         gluon.jit(func, do_not_specialize=do_not_specialize)
                     )
                 else:
                     return gluon.jit(func, do_not_specialize=do_not_specialize)
             else:
                 if enable_autotune:
-                    return triton.autotune(configs=config, key=keys)(
+                    return triton.autotune(configs=config, key=keys, restore_value=restored_kwargs)(
                         triton.jit(func, do_not_specialize=do_not_specialize)
                     )
                 else:
@@ -75,6 +76,7 @@ def get_autotune_cache(
     enable_autotune,
     config, keys,
     do_not_specialize: Optional[List[str]]=[],
+    restored_kwargs: Optional[List[str]]=[],
     is_gluon: Optional[bool]=False,
 ):
     """Get cached kernel to avoid recompilation"""
@@ -86,6 +88,7 @@ def get_autotune_cache(
             config=list(config),
             keys=keys,
             do_not_specialize=do_not_specialize,
+            restored_kwargs=restored_kwargs,
             is_gluon=is_gluon,
         )(func)
     return _autotune_cache[cache_key]
@@ -101,16 +104,6 @@ def get_autotune_config(params: List[str], **kwargs) -> List[triton.Config]:
     return AutotuneMixin.generate_autotune_config(tuning_dict)
 
 
-@triton.autotune(
-    configs=generate_autotune_config(
-        dict(
-            BLOCK_M=[1, 2, 4, 8],
-            num_stages=[3, 4],
-        )
-    ),
-    key=['HQ', 'HK', 'N'],
-)
-@triton.jit(do_not_specialize=['B', 'L', 'M'])
 def triton_rope_qk_align_fwd(
     q: tl.tensor,
     k: tl.tensor,

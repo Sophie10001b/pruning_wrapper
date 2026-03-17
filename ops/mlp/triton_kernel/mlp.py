@@ -732,6 +732,7 @@ class BKSparseMLP:
             enable_autotune=True,
             config=config,
             keys=['M', 'N', 'K'],
+            restored_kwargs=['out'],
         )
 
         kernel[grid](

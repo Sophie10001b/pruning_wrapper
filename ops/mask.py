@@ -7,7 +7,7 @@ from collections import namedtuple
 
 from einops import rearrange
 from typing import Optional, Dict, Sequence
-from torch.sparse.semi_structured import SparseSemiStructuredTensor
+from torch.sparse.semi_structured import SparseSemiStructuredTensor, SparseSemiStructuredTensorCUTLASS
 
 _SEMI_STRUCTURED_SPARSE_CONFIG = namedtuple(
     "_SEMI_STRUCTURED_SPARSE_CONFIG",
@@ -50,7 +50,7 @@ def search_for_alg_id(
     A_compress = torch._cslt_compress(A)
 
     alg_id, split_k, split_k_mode, _ = torch._C._cusparselt.mm_search(A_compress, B.t(), None, None, None, False)
-    return (alg_id, split_k, split_k_mode)
+    return alg_id
 
 class SparseSemiStructuredTensorCUSPARSELT(SparseSemiStructuredTensor):
     """
@@ -85,10 +85,8 @@ class SparseSemiStructuredTensorCUSPARSELT(SparseSemiStructuredTensor):
 
         # search for best ALG_ID for spmm
         # from https://github.com/pytorch/pytorch/issues/153825
-        alg_id, split_k, split_k_mode = search_for_alg_id(original_tensor.shape, device=original_tensor.device, dtype=original_tensor.dtype)
+        alg_id = search_for_alg_id(original_tensor.shape, device=original_tensor.device, dtype=original_tensor.dtype)
         cls._ALG_CONFIG['alg_id'] = alg_id
-        cls._ALG_CONFIG['split_k'] = split_k
-        cls._ALG_CONFIG['split_k_mode'] = split_k_mode
 
         return cls(
             shape=original_tensor.shape,
