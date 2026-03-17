@@ -250,7 +250,7 @@ class PVSparseDecode:
         Args:
             q, k, v: torch.Tensor with shape [batch_size, seqlen, num_heads, head_dim]
             pad_offset: Optional[torch.Tensor] with shape [batch_size,], left padding offset for key and value
-            skip_block: Optional[torch.Tensor] with shape [batch_size, LK // 16], predefined skip decision for each kv block
+            skip_block: Optional[torch.Tensor] with shape [LK // 16], predefined skip decision for each kv block
             impl: str, impl of kernel
             do_not_specialize: List, omit kernel re-compile for these variables
         """
@@ -276,6 +276,8 @@ class PVSparseDecode:
         BLOCK_M = max(16, triton.next_power_of_2(G))
         BLOCK_N = min(64, max(16, triton.next_power_of_2(LK)))
         BLOCK_N = kwargs.pop('BLOCK_N', BLOCK_N)
+        BLOCK_N = kwargs.pop('block_size', BLOCK_N)
+
         num_stages = 3
         num_warps = 4
 
@@ -295,7 +297,6 @@ class PVSparseDecode:
             num_stages=num_stages,
             num_warps=num_warps,
             pad_offset=pad_offset,
-            BLOCK_N_list=[16, 32, 64],
             num_stages_list=[2, 3],
             **kwargs
         )

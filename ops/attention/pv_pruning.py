@@ -20,7 +20,7 @@ os.environ['TRITON_DEBUG']='0'
 
 STYLES = [('blue', '-'), ('red', '-'), ('green', '-'), ('orange', '-'), ('purple', '-'), ('brown', '-'), ('pink', '-'), ('gray', '-'), ('olive', '-'), ('cyan', '-')]
 
-class PVSparseAttentionKernel(_PruningAttentionKernel):
+class BlasstAttentionKernel(_PruningAttentionKernel):
     """
     Kernel Implementation:
 
@@ -112,7 +112,7 @@ class PVSparseAttentionKernel(_PruningAttentionKernel):
         k: torch.Tensor,
         v: torch.Tensor,
         threshold: float,
-        block_size: Optional[int]=128,
+        block_size: Optional[int]=64,
         pad_offset: Optional[torch.Tensor]=None,
         execute_block: Optional[torch.Tensor]=None,
         prefill_impl: Optional[str]='blasst',
@@ -319,7 +319,7 @@ def run_test(*args, **kwargs):
 
     print(f"Detected device capability: {cc}, using dtype {dtype} for testing")
 
-    kernel = PVSparseAttentionKernel()
+    kernel = BlasstAttentionKernel()
     print(f"1. Test precision diff")
     kernel.precision_diff(device=device, dtype=dtype)
 

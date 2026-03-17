@@ -1,3 +1,4 @@
+print_autotune=0
 model_name=llama3.1-8b
 model_path=/root/autodl-fs/modelscope_cache/llama3.1-8b
 
@@ -11,6 +12,8 @@ sparsity=0.5
 
 batch_size=(8)
 seq_len=(1024)
+
+export TRITON_PRINT_AUTOTUNING=$print_autotune
 
 python main.py \
     --model_name $model_name \

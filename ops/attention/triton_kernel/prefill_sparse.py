@@ -164,7 +164,7 @@ class PVSparsePrefill:
         Args:
             q, k, v: torch.Tensor with shape [batch_size, seqlen, num_heads, head_dim]
             pad_offset: Optional[torch.Tensor] with shape [batch_size,], left padding offset for key and value
-            skip_block: Optional[torch.Tensor] with shape [batch_size, LK // 16], predefined skip decision for each kv block
+            skip_block: Optional[torch.Tensor] with shape [LK // 16], predefined skip decision for each kv block
             impl: str, impl of kernel
             do_not_specialize: List, omit kernel re-compile for these variables
         """
@@ -184,11 +184,12 @@ class PVSparsePrefill:
         num_warps = 4
 
         BLOCK_M = triton.next_power_of_2(LQ)
-        BLOCK_M = min(128, max(16, BLOCK_M))
-        BLOCK_N = min(32, max(16, triton.next_power_of_2(LQ)))
+        BLOCK_M = min(64, max(16, BLOCK_M))
+        BLOCK_N = min(64, max(16, triton.next_power_of_2(LQ)))
         
         BLOCK_M = kwargs.pop('BLOCK_M', BLOCK_M)
         BLOCK_N = kwargs.pop('BLOCK_N', BLOCK_N)
+        BLOCK_N = kwargs.pop('block_size', BLOCK_N)
 
         if impl not in cls.support_kernel:
             raise ValueError(f"{impl} is not supported")
@@ -199,8 +200,7 @@ class PVSparsePrefill:
             num_stages=num_stages,
             num_warps=num_warps,
             pad_offset=pad_offset,
-            BLOCK_M_list=[16, 32, 64, 128],
-            BLOCK_N_list=[16, 32, 64],
+            BLOCK_M_list=[16, 32, 64],
             num_stages_list=[2, 3],
             **kwargs
         )

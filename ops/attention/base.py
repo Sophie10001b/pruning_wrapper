@@ -8,6 +8,8 @@ from flash_attn import flash_attn_with_kvcache
 from transformers.cache_utils import Cache
 from transformers.modeling_flash_attention_utils import _flash_attention_forward, flash_attn_supports_top_left_mask
 
+from .triton_kernel.decode import DenseDecode
+
 _use_top_left_mask = flash_attn_supports_top_left_mask()
 
 class _PruningAttentionKernel(nn.Module):
@@ -70,12 +72,25 @@ class DenseAttentionKernel(_PruningAttentionKernel):
         k: torch.Tensor,
         v: torch.Tensor,
         pad_offset: Optional[torch.Tensor]=None,
+        enable_xqa: Optional[bool]=True,
+        **kwargs,
     ):
-        attn_output = flash_attn_with_kvcache(
-            q, k, v,
-            causal=True,
-            cache_leftpad=pad_offset.to(torch.int32),
-        )
+        if enable_xqa and q.shape[2] > k.shape[2]:
+            attn_output = DenseDecode.kernel(
+                q=q,
+                k=k,
+                v=v,
+                pad_offset=pad_offset,
+                impl='auto',
+                **kwargs,
+            )
+        else:
+            attn_output = flash_attn_with_kvcache(
+                q, k, v,
+                causal=True,
+                cache_leftpad=pad_offset.to(torch.int32),
+            )
+
         return attn_output
     
     @classmethod
@@ -89,6 +104,8 @@ class DenseAttentionKernel(_PruningAttentionKernel):
         pad_offset: Optional[torch.Tensor]=None,
         prefill_impl: Optional[str]='',
         decode_impl: Optional[str]='',
+        enable_autotune: Optional[bool]=True,
+        enable_xqa: Optional[bool]=True,
         **kwargs,
     ):
         assert k.dim() == 4 and q.dim() == 4
@@ -100,7 +117,7 @@ class DenseAttentionKernel(_PruningAttentionKernel):
                 out = out * route_mask
         else:
             if pad_offset is None: pad_offset = torch.zeros(q.shape[0], device=q.device)
-            out = cls.base_decode(q, k, v, pad_offset)
+            out = cls.base_decode(q, k, v, pad_offset, enable_xqa=enable_xqa, enable_autotune=enable_autotune)
             if route_mask is not None:
                 while route_mask.dim() < out.dim():
                     route_mask = route_mask.unsqueeze(-1)
