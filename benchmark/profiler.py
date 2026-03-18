@@ -1,4 +1,5 @@
 import os
+import nvtx
 import torch
 import torch.nn as nn
 import torch.distributed as dist
@@ -141,7 +142,8 @@ class ModelProfiler:
                 runtime.driver.active.clear_cache(device_cache)
                 device_interface.synchronize()
                 start_events[i].record()
-                self.model(**model_inputs_kwargs)
+                with nvtx.annotate(f"TTFT_Step{i}", color='orange'):
+                    self.model(**model_inputs_kwargs)
                 if self.profiler is not None: self.profiler.step()
                 end_events[i].record()
                 device_interface.synchronize()
@@ -179,7 +181,8 @@ class ModelProfiler:
 
                     device_interface.synchronize()
                     start_events[i].record()
-                    g.replay()
+                    with nvtx.annotate(f"TTFT_Step{i}", color='orange'):
+                        g.replay()
                     if self.profiler is not None: self.profiler.step()
                     end_events[i].record()
                     device_interface.synchronize()
@@ -261,7 +264,8 @@ class ModelProfiler:
                 runtime.driver.active.clear_cache(device_cache)
                 device_interface.synchronize()
                 start_events[i].record()
-                self.model(**model_inputs_kwargs)
+                with nvtx.annotate(f"TPOT_Step{i}", color='orange'):
+                    self.model(**model_inputs_kwargs)
                 if self.profiler is not None: self.profiler.step()
                 end_events[i].record()
                 device_interface.synchronize()
@@ -302,7 +306,8 @@ class ModelProfiler:
 
                     device_interface.synchronize()
                     start_events[i].record()
-                    g.replay()
+                    with nvtx.annotate(f"TPOT_Step{i}", color='orange'):
+                        g.replay()
                     if self.profiler is not None: self.profiler.step()
                     end_events[i].record()
                     device_interface.synchronize()

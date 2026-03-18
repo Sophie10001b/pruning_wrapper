@@ -1,6 +1,7 @@
 import random
 import torch
 import torch.nn as nn
+import nvtx
 
 from typing import Optional, Tuple, Dict, List, Union, Any, Sequence
 from einops import rearrange
@@ -56,19 +57,23 @@ class StructuredMLP(DenseMLP):
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
 
-        glu_output = self.mlp_impl(
-            hidden_states,
-            w_up=self.up_proj.weight,
-            w_gate=self.gate_proj.weight,
-            b_up=self.up_proj.bias,
-            b_gate=self.gate_proj.bias,
-            activation=self.activation,
-        )
-        ffn_output = self.mlp_impl(
-            glu_output,
-            w_up=self.down_proj.weight,
-            b_down=self.down_proj.bias,
-        )
+        with nvtx.annotate("glu", color='green'):
+            with record_function("glu"):
+                glu_output = self.mlp_impl(
+                    hidden_states,
+                    w_up=self.up_proj.weight,
+                    w_gate=self.gate_proj.weight,
+                    b_up=self.up_proj.bias,
+                    b_gate=self.gate_proj.bias,
+                    activation=self.activation,
+                )
+        with nvtx.annotate("down_proj", color='green'):
+            with record_function("down_proj"):
+                ffn_output = self.mlp_impl(
+                    glu_output,
+                    w_up=self.down_proj.weight,
+                    b_down=self.down_proj.bias,
+                )
         return ffn_output + self.residual_map(residual)
 
 #################### ATTN ####################
@@ -108,9 +113,13 @@ class StructuredAttention(DenseAttention):
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
 
-        q = self.q_proj(hidden_states)
-        k = self.k_proj(hidden_states)
-        v = self.v_proj(hidden_states)
+        with record_function("qkv_proj"):
+            with nvtx.annotate("q_proj", color='blue'):
+                q = self.q_proj(hidden_states)
+            with nvtx.annotate("k_proj", color='blue'):
+                k = self.k_proj(hidden_states)
+            with nvtx.annotate("v_proj", color='blue'):
+                v = self.v_proj(hidden_states)
 
         q, k, v = list(map(lambda x: rearrange(x, '... (h d) -> ... h d', d=self.head_dim), [q, k, v]))
         if self.q_norm: q = self.q_norm(q)
@@ -124,13 +133,17 @@ class StructuredAttention(DenseAttention):
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
             k, v = past_key_values.update(k, v, self.layer_idx, cache_kwargs)
         
-        attn_output = self.attention_impl(
-            q, k, v,
-            attention_mask=attention_mask,
-            pad_offset=pad_offset,
-        )
+        with nvtx.annotate("attention", color='blue'):
+            with record_function("attention"):
+                attn_output = self.attention_impl(
+                    q, k, v,
+                    attention_mask=attention_mask,
+                    pad_offset=pad_offset,
+                )
         attn_output = rearrange(attn_output, '... h d -> ... (h d)')
-        attn_output = self.o_proj(attn_output)
+        with nvtx.annotate("o_proj", color='blue'):
+            with record_function("o_proj"):
+                attn_output = self.o_proj(attn_output)
 
         return attn_output + self.residual_map(residual)
 
@@ -243,7 +256,6 @@ class StructuredModel(StructuredPretrainedModel):
             last_hidden_state=hidden_states,
             past_key_values=past_key_values,
         )
-        
 
 class StructuredForCausalLM(PrunedModelForCausalLM):
     def __init__(

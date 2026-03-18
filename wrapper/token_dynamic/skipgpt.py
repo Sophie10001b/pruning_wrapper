@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import nvtx
 
 from typing import Optional, Tuple, Dict, List, Union, Any
 from einops import rearrange
@@ -57,6 +58,7 @@ class SkipGPTMLP(nn.Module):
         config: PretrainedConfig,
         pruning_config: Dict[str, Any],
         block: nn.Module,
+        post_attention_layernorm: nn.Module,
         **kwargs,
     ):
         super().__init__()
@@ -70,6 +72,7 @@ class SkipGPTMLP(nn.Module):
         self.up_proj = block.up_proj
         self.gate_proj = block.gate_proj
         self.down_proj = block.down_proj
+        self.post_attention_layernorm = post_attention_layernorm
 
         # ffn pruning impl
         for key in self._support_pruning_components:
@@ -107,46 +110,57 @@ class SkipGPTMLP(nn.Module):
         pruning_kwargs: Optional[Dict[str, Any]]=None,
         **kwargs,
     ):
+        residual = hidden_states
+        hidden_states = self.post_attention_layernorm(hidden_states)
+
         route_mask = pruning_kwargs.get('ffn', None)
         # ffn fuse
         if self.ffn_impl is not None:
-            ffn_output = self.ffn_impl(
-                hidden_states,
-                w_up=self.up_proj.weight,
-                w_gate=self.gate_proj.weight,
-                w_down=self.down_proj.weight,
-                b_up=self.up_proj.bias,
-                b_gate=self.gate_proj.bias,
-                route_mask=route_mask,
-                activation=self.activation,
-                **getattr(self, f'ffn_kwargs', {}), # pruning_type, backend, estimated_sparsity, prefill_impl, decode_impl, etc.
-            )
+            with nvtx.annotate("ffn", color='green'):
+                with record_function("ffn"):
+                    ffn_output = self.ffn_impl(
+                        hidden_states,
+                        w_up=self.up_proj.weight,
+                        w_gate=self.gate_proj.weight,
+                        w_down=self.down_proj.weight,
+                        b_up=self.up_proj.bias,
+                        b_gate=self.gate_proj.bias,
+                        route_mask=route_mask,
+                        activation=self.activation,
+                        **getattr(self, f'ffn_kwargs', {}), # pruning_type, backend, estimated_sparsity, prefill_impl, decode_impl, etc.
+                    )
         else:
-            up_output = self.up_proj_impl(
-                hidden_states,
-                w_up=self.up_proj.weight,
-                b_up=self.up_proj.bias,
-                route_mask=pruning_kwargs.get('up_proj', None),
-                **getattr(self, f'up_proj_kwargs', {}),
-            )
-            gate_output = self.gate_proj_impl(
-                hidden_states,
-                w_up=self.gate_proj.weight,
-                b_up=self.gate_proj.bias,
-                route_mask=pruning_kwargs.get('gate_proj', None),
-                activation=self.activation,
-                **getattr(self, f'gate_proj_kwargs', {}),
-            )
+            with nvtx.annotate("up_proj", color='green'):
+                with record_function("up_proj"):
+                    up_output = self.up_proj_impl(
+                        hidden_states,
+                        w_up=self.up_proj.weight,
+                        b_up=self.up_proj.bias,
+                        route_mask=pruning_kwargs.get('up_proj', None),
+                        **getattr(self, f'up_proj_kwargs', {}),
+                    )
+            with nvtx.annotate("gate_proj", color='green'):
+                with record_function("gate_proj"):
+                    gate_output = self.gate_proj_impl(
+                        hidden_states,
+                        w_up=self.gate_proj.weight,
+                        b_up=self.gate_proj.bias,
+                        route_mask=pruning_kwargs.get('gate_proj', None),
+                        activation=self.activation,
+                        **getattr(self, f'gate_proj_kwargs', {}),
+                    )
             ffn_output = up_output * gate_output
-            ffn_output = self.down_proj_impl(
-                ffn_output,
-                w_up=self.down_proj.weight,
-                b_up=self.down_proj.bias,
-                route_mask=pruning_kwargs.get('down_proj', None),
-                **getattr(self, f'down_proj_kwargs', {}),
-            )
+            with nvtx.annotate("down_proj", color='green'):
+                with record_function("down_proj"):
+                    ffn_output = self.down_proj_impl(
+                        ffn_output,
+                        w_up=self.down_proj.weight,
+                        b_up=self.down_proj.bias,
+                        route_mask=pruning_kwargs.get('down_proj', None),
+                        **getattr(self, f'down_proj_kwargs', {}),
+                    )
         
-        return ffn_output
+        return ffn_output + residual
 
 #################### Attention ####################
 class SkipGPTAttention(nn.Module):
@@ -162,6 +176,7 @@ class SkipGPTAttention(nn.Module):
         config: PretrainedConfig,
         pruning_config: Dict[str, Any],
         block: nn.Module,
+        input_layernorm: nn.Module,
         **kwargs,
     ):
         super().__init__()
@@ -179,6 +194,7 @@ class SkipGPTAttention(nn.Module):
         self.k_proj = block.k_proj
         self.v_proj = block.v_proj
         self.o_proj = block.o_proj
+        self.input_layernorm = input_layernorm
 
         self.q_norm = getattr(block, "q_norm", None)
         self.k_norm = getattr(block, "k_norm", None)
@@ -232,28 +248,36 @@ class SkipGPTAttention(nn.Module):
         pruning_kwargs: Optional[Dict[str, Any]]=None,
         **kwargs,
     ) -> torch.Tensor:
+        residual = hidden_states
+        hidden_states = self.input_layernorm(hidden_states)
+        
         route_mask = pruning_kwargs.get('attention', None)
-        q = self.q_proj_impl(
-            hidden_states,
-            w_up=self.q_proj.weight,
-            b_up=self.q_proj.bias,
-            route_mask=pruning_kwargs.get('q_proj', route_mask),
-            **getattr(self, f'q_proj_kwargs', {}),
-        )
-        k = self.k_proj_impl(
-            hidden_states,
-            w_up=self.k_proj.weight,
-            b_up=self.k_proj.bias,
-            route_mask=pruning_kwargs.get('k_proj', None),
-            **getattr(self, f'k_proj_kwargs', {}),
-        )
-        v = self.v_proj_impl(
-            hidden_states,
-            w_up=self.v_proj.weight,
-            b_up=self.v_proj.bias,
-            route_mask=pruning_kwargs.get('v_proj', None),
-            **getattr(self, f'v_proj_kwargs', {}),
-        )
+
+        with record_function("qkv_proj"):
+            with nvtx.annotate("q_proj", color='blue'):
+                q = self.q_proj_impl(
+                    hidden_states,
+                    w_up=self.q_proj.weight,
+                    b_up=self.q_proj.bias,
+                    route_mask=pruning_kwargs.get('q_proj', route_mask),
+                    **getattr(self, f'q_proj_kwargs', {}),
+                )
+            with nvtx.annotate("k_proj", color='blue'):
+                k = self.k_proj_impl(
+                    hidden_states,
+                    w_up=self.k_proj.weight,
+                    b_up=self.k_proj.bias,
+                    route_mask=pruning_kwargs.get('k_proj', None),
+                    **getattr(self, f'k_proj_kwargs', {}),
+                )
+            with nvtx.annotate("v_proj", color='blue'):
+                v = self.v_proj_impl(
+                    hidden_states,
+                    w_up=self.v_proj.weight,
+                    b_up=self.v_proj.bias,
+                    route_mask=pruning_kwargs.get('v_proj', None),
+                    **getattr(self, f'v_proj_kwargs', {}),
+                )
 
         q, k, v = list(map(lambda x: rearrange(x, '... (h d) -> ... h d', d=self.head_dim), [q, k, v]))
         if self.q_norm: q = self.q_norm(q)
@@ -267,23 +291,27 @@ class SkipGPTAttention(nn.Module):
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
             k, v = past_key_values.update(k, v, self.layer_idx, cache_kwargs)
         
-        attn_output = self.attention_impl(
-            q, k, v,
-            attention_mask=attention_mask,
-            pad_offset=pad_offset,
-            route_mask=route_mask,
-            **getattr(self, f'attention_kwargs', {}),
-        )
+        with nvtx.annotate("attention", color='blue'):
+            with record_function("attention"):
+                attn_output = self.attention_impl(
+                    q, k, v,
+                    attention_mask=attention_mask,
+                    pad_offset=pad_offset,
+                    route_mask=route_mask,
+                    **getattr(self, f'attention_kwargs', {}),
+                )
         attn_output = rearrange(attn_output, '... h d -> ... (h d)')
-        attn_output = self.o_proj_impl(
-            attn_output,
-            w_up=self.o_proj.weight,
-            b_up=self.o_proj.bias,
-            route_mask=pruning_kwargs.get('o_proj', route_mask),
-            **getattr(self, f'o_proj_kwargs', {}),
-        )
+        with nvtx.annotate("o_proj", color='blue'):
+            with record_function("o_proj"):
+                attn_output = self.o_proj_impl(
+                    attn_output,
+                    w_up=self.o_proj.weight,
+                    b_up=self.o_proj.bias,
+                    route_mask=pruning_kwargs.get('o_proj', route_mask),
+                    **getattr(self, f'o_proj_kwargs', {}),
+                )
 
-        return attn_output
+        return attn_output + residual
 
 #################### Layer ####################
 class SkipGPTDecoderLayer(nn.Module):
@@ -343,8 +371,8 @@ class SkipGPTDecoderLayer(nn.Module):
         self.attn_approximator = None
         self.ffn_approximator = None
         
-        self.self_attn = SkipGPTAttention(config, pruning_config, block.self_attn, **kwargs)
-        self.mlp = SkipGPTMLP(config, pruning_config, block.mlp, **kwargs)
+        self.self_attn = SkipGPTAttention(config, pruning_config, block.self_attn, block.input_layernorm, **kwargs)
+        self.mlp = SkipGPTMLP(config, pruning_config, block.mlp, block.post_attention_layernorm, **kwargs)
     
     def _init_router(self):
         for key in self._support_pruning_components:
@@ -385,7 +413,7 @@ class SkipGPTDecoderLayer(nn.Module):
         estimated_sparsity: Optional[float]=-1,
         **kwargs,
     ) -> Dict[str, torch.Tensor]:
-        with record_function("**Router**"):
+        with record_function(f"Router_{self.layer_idx}"):
             pruning_kwargs = {}
             for name in pruning_targets:
                 router_name = f'{name}_router'
@@ -398,7 +426,10 @@ class SkipGPTDecoderLayer(nn.Module):
                     
             if estimated_sparsity >= 0: # generated benchmarking mask
                 for key in pruning_kwargs.keys():
-                    pruning_kwargs[key] = torch.rand_like(pruning_kwargs[key].float()) > self.pruning_config[key].get('estimated_sparsity', estimated_sparsity)
+                    sparsity = estimated_sparsity
+                    if key in ['up_proj', 'gate_proj', 'down_proj']: sparsity = self.pruning_config['ffn'][key].get('estimated_sparsity', estimated_sparsity)
+                    else: sparsity = self.pruning_config[key].get('estimated_sparsity', estimated_sparsity)
+                    pruning_kwargs[key] = torch.rand_like(pruning_kwargs[key].float()) > sparsity
 
         return pruning_kwargs
 
@@ -425,9 +456,7 @@ class SkipGPTDecoderLayer(nn.Module):
         use_predefined_route = pruning_kwargs is not None
 
         # 2. attention
-        residual = hidden_states
-        hidden_states = self.input_layernorm(hidden_states)
-        with record_function("**Attention**"):
+        with nvtx.annotate(f"Layer_{self.layer_idx}", color='red'):
             hidden_states = self.self_attn(
                 hidden_states,
                 attention_mask=attention_mask,
@@ -441,23 +470,17 @@ class SkipGPTDecoderLayer(nn.Module):
                 **kwargs,
             )
 
-        hidden_states = hidden_states + residual
+            # 3. FFN
+            if self.router_order == 'diff':
+                pruning_targets = ['ffn', 'up_proj', 'gate_proj', 'down_proj']
+                local_pruning_kwargs = self.generate_pruning_kwargs(hidden_states, pruning_targets)
 
-        # 3. FFN
-        if self.router_order == 'diff':
-            pruning_targets = ['ffn', 'up_proj', 'gate_proj', 'down_proj']
-            local_pruning_kwargs = self.generate_pruning_kwargs(hidden_states, pruning_targets)
-
-        residual = hidden_states
-        hidden_states = self.post_attention_layernorm(hidden_states)
-        with record_function("**FFN**"):
             hidden_states = self.mlp(
                 hidden_states,
                 pruning_kwargs=pruning_kwargs if use_predefined_route else local_pruning_kwargs,
                 **kwargs,
             )
-        hidden_states = hidden_states + residual
-        return hidden_states
+            return hidden_states
 
 class SkipGPTPretrainedModel(PreTrainedModel):
     config: PretrainedConfig

@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import nvtx
 
 from typing import Optional, Tuple, Dict, List, Union, Any
 from einops import rearrange
@@ -56,9 +57,13 @@ class SparseAttention(PrunedAttention):
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
 
-        q = self.q_proj(hidden_states)
-        k = self.k_proj(hidden_states)
-        v = self.v_proj(hidden_states)
+        with record_function("qkv_proj"):
+            with nvtx.annotate("q_proj", color='blue'):
+                q = self.q_proj(hidden_states)
+            with nvtx.annotate("k_proj", color='blue'):
+                k = self.k_proj(hidden_states)
+            with nvtx.annotate("v_proj", color='blue'):
+                v = self.v_proj(hidden_states)
 
         q, k, v = list(map(lambda x: rearrange(x, '... (h d) -> ... h d', d=self.head_dim), [q, k, v]))
         if self.q_norm: q = self.q_norm(q)
@@ -79,10 +84,14 @@ class SparseAttention(PrunedAttention):
             execute_block=getattr(self, 'execute_block', None),
         )
         input_kwargs.update(self.threshold_impl.get_threshold_kwargs())
-        
-        attn_output = self.attention_impl(**input_kwargs)
+
+        with nvtx.annotate("attention", color='blue'):
+            with record_function("attention"):
+                attn_output = self.attention_impl(**input_kwargs)
         attn_output = rearrange(attn_output, '... h d -> ... (h d)')
-        attn_output = self.o_proj(attn_output)
+        with nvtx.annotate("o_proj", color='blue'):
+            with record_function("o_proj"):
+                attn_output = self.o_proj(attn_output)
 
         return attn_output + residual
 
@@ -133,7 +142,7 @@ class SparseAttentionDecoderLayer(PrunedDecoderLayer):
         pad_offset: Optional[torch.Tensor]=None,
         **kwargs,
     ):
-        with record_function(f"Attention_{self.layer_idx}"):
+        with nvtx.annotate(f"Layer_{self.layer_idx}", color='red'):
             hidden_states = self.self_attn(
                 hidden_states,
                 attention_mask=attention_mask,
@@ -146,7 +155,6 @@ class SparseAttentionDecoderLayer(PrunedDecoderLayer):
                 **kwargs,
             )
 
-        with record_function(f"FFN_{self.layer_idx}"):
             hidden_states = self.mlp(hidden_states)
         return hidden_states
 

@@ -6,7 +6,7 @@ from transformers import set_seed
 
 from prologue import init_model
 from benchmark.profiler import ModelProfiler
-from utils import print_results
+from utils import record_results
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Pruning Wrapper")
@@ -94,21 +94,8 @@ def main():
                     print(f"[ERROR] {e}")
                     res_dict[(batch_size, seq_len)] = [0, 0, 0]
         
-        print(f'[INFO] Model: {args.model_name}, Config: {config_path}, {args.benchmark_metric} results:')
-        res_str = print_results(res_dict)
-        print(res_str)
-
-        # record to tmp txt, if exist then add to the end, if not exist then create
-        if not os.path.exists(f"{profiler_name}.txt"):
-            with open(f"{profiler_name}.txt", "w") as f:
-                f.write(f"Model: {args.model_name}, Config: {config_path}, {args.benchmark_metric} results:\n")
-                f.write(res_str)
-                f.write("\n")
-        else:
-            with open(f"{profiler_name}.txt", "a") as f:
-                f.write(f"Model: {args.model_name}, Config: {config_path}, {args.benchmark_metric} results:\n")
-                f.write(res_str)
-                f.write("\n")
+        prefix = f'[INFO] Model: {args.model_name}, Config: {config_path}, {args.benchmark_metric} results:'
+        record_results(res_dict, f"{profiler_name}.txt", prefix)
 
 if __name__ == "__main__":
     main()
