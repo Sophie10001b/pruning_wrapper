@@ -515,7 +515,6 @@ class DensePrefill:
         BLOCK_N = min(128, max(16, triton.next_power_of_2(LQ)))
 
         assert D <= 128, f"sm80 style flash_attn head_dim {D} must be <= 128"
-        while D == 128 and BLOCK_N >= 128: BLOCK_N = BLOCK_N >> 1
 
         while not check_shared_memory_attn(BLOCK_M, BLOCK_N, D, num_stages, dtype.itemsize):
                 if BLOCK_N > 32: BLOCK_N >>= 1
@@ -649,7 +648,6 @@ class QuerySparsePrefill:
         BLOCK_N = min(128, max(16, triton.next_power_of_2(LQ)))
 
         assert D <= 128, f"sm80 style flash_attn head_dim {D} must be <= 128"
-        while D == 128 and BLOCK_N >= 128: BLOCK_N = BLOCK_N >> 1
 
         while not check_shared_memory_attn(BLOCK_M, BLOCK_N, D, num_stages, dtype.itemsize):
                 if BLOCK_N > 32: BLOCK_N >>= 1
@@ -791,7 +789,6 @@ class GroupSparsePrefill:
         BLOCK_N = min(128, max(16, triton.next_power_of_2(LQ)))
 
         assert D <= 128, f"sm80 style flash_attn head_dim {D} must be <= 128"
-        while D == 128 and BLOCK_N >= 128: BLOCK_N = BLOCK_N >> 1
 
         while not check_shared_memory_attn(BLOCK_M, BLOCK_N, D, num_stages, dtype.itemsize):
                 if BLOCK_N > 32: BLOCK_N >>= 1
@@ -931,7 +928,6 @@ class HeadSparsePrefill:
         BLOCK_N = min(128, max(16, triton.next_power_of_2(LQ)))
 
         assert D <= 128, f"sm80 style flash_attn head_dim {D} must be <= 128"
-        while D == 128 and BLOCK_N >= 128: BLOCK_N = BLOCK_N >> 1
         
         BLOCK_M = kwargs.pop('BLOCK_M', BLOCK_M)
         BLOCK_N = kwargs.pop('BLOCK_N', BLOCK_N)

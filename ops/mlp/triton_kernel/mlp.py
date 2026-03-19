@@ -427,7 +427,7 @@ class BMSparseMLP:
             if BLOCK_M >= int(M * estimated_sparsity): BLOCK_M = BLOCK_M >> 1
 
             BLOCK_M = min(128, max(16, BLOCK_M))
-            BLOCK_N = min(128, max(16, triton.next_power_of_2(N)))
+            BLOCK_N = min(256, max(16, triton.next_power_of_2(N)))
             BLOCK_K = min(64, max(32, triton.next_power_of_2(K)))
             
             BLOCK_M = kwargs.pop('BLOCK_M', BLOCK_M)
@@ -815,7 +815,7 @@ class BKSparseMLP:
             if BLOCK_M >= int(M * estimated_sparsity): BLOCK_M = BLOCK_M >> 1
 
             BLOCK_M = min(128, max(16, BLOCK_M))
-            BLOCK_N = min(128, max(32, triton.next_power_of_2(N)))
+            BLOCK_N = min(256, max(32, triton.next_power_of_2(N)))
 
             while not check_shared_memory_gemm(BLOCK_M, BLOCK_N, BLOCK_K, num_stages, dtype.itemsize):
                 if BLOCK_K > 32: BLOCK_K >>= 1
