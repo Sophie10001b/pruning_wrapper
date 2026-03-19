@@ -13,6 +13,12 @@ os.environ['TRITON_PRINT_AUTOTUNING']='0'
 
 _autotune_cache = {}
 
+def get_shared_memory_size():
+    major, minor = torch.cuda.get_device_capability("cuda")
+    if major == 0 and minor == 0: return 163 * 1024 # A100
+    elif major in (9, 10): return 227 * 1024 # H100, B100, etc.
+    else: return 99 * 1024 # consumer-grade GPUs
+
 def generate_autotune_config(tuning_dict: Dict):
     keys = list(tuning_dict.keys())
     value_lists = [tuning_dict[key] for key in keys]
@@ -103,6 +109,64 @@ def get_autotune_config(params: List[str], **kwargs) -> List[triton.Config]:
     
     return AutotuneMixin.generate_autotune_config(tuning_dict)
 
+def check_shared_memory_gemm(BM: int, BN: int, BK: int, stage: int, dtype_in_byte: int):
+    shared_memory_size = get_shared_memory_size()
+    return ((BM * BK) * stage + (BN * BK) * stage) * dtype_in_byte <= shared_memory_size / 2
+
+def check_shared_memory_attn(BM: int, BN: int, BK: int, stage: int, dtype_in_byte: int):
+    shared_memory_size = get_shared_memory_size()
+    return ((BM * BK) * stage + (BN * BK) * 2 * stage) * dtype_in_byte <= shared_memory_size / 2
+
+# optimization config for autotune disabled
+def config_optimize(
+    m_list: List[int],
+    n_list: List[int],
+    num_stages: List[int],
+    k_list: Optional[List[int]]=[32],
+    is_attention: Optional[bool]=False,
+    dtype_in_byte: Optional[int]=2, # bfloat16
+    M: Optional[int]=1,
+    N: Optional[int]=1,
+    B: Optional[int]=1,
+    H: Optional[int]=1,
+):
+    shared_memory_size = get_shared_memory_size()
+    sm_num = torch.cuda.get_device_properties("cuda").multi_processor_count
+    
+    sm_loop_num = 0
+    remains = 0
+    best_setting = None
+
+    for k in k_list:
+        for n in n_list:
+            for stage in num_stages:
+                for m in m_list:
+                    # 1. check shared memory usage
+                    if is_attention: smem = ((m * k) * num_stages + (n * k) * 2 * num_stages) * dtype_in_byte
+                    else: smem = ((m * k) * num_stages + (n * k) * num_stages) * dtype_in_byte
+
+                    if smem > shared_memory_size / 2: continue
+
+                    # 2. check SM utilization
+                    if is_attention: current_sm = B * H * triton.cdiv(M, m)
+                    else: current_sm = triton.cdiv(M, m) * triton.cdiv(N, n)
+
+                    sm_loop_num = current_sm // sm_num
+                    remains = current_sm % sm_num
+                    
+                    if best_setting is None: best_setting = (sm_loop_num, remains, m, n, k, stage)
+                    else:
+                        if sm_loop_num == 0 and best_setting[0] > 1: continue
+
+                        if best_setting[0] == 0 and sm_loop_num > 0: best_setting = (sm_loop_num, remains, m, n, k, stage)
+                        elif best_setting[1] < remains and best_setting[0] > 0: best_setting = (sm_loop_num, remains, m, n, k, stage)
+    
+    return dict(
+        BLOCK_M=best_setting[2],
+        BLOCK_N=best_setting[3],
+        BLOCK_K=best_setting[4],
+        num_stages=best_setting[5],
+    )
 
 def triton_rope_qk_align_fwd(
     q: tl.tensor,

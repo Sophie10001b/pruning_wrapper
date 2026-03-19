@@ -8,7 +8,7 @@ import triton.language as tl
 from typing import Optional, Tuple, Dict, List, Any
 from einops import rearrange
 
-from ops.utils import get_autotune_config, get_autotune_cache
+from ops.utils import get_autotune_config, get_autotune_cache, check_shared_memory_gemm
 
 #########################
 # Kernel Implementation
@@ -323,7 +323,6 @@ class BMSparseMLP:
         do_not_specialize: Optional[List]=['M'],
         **kwargs
     ):
-        
         B, L, D = x.shape
 
         M = B * L
@@ -429,18 +428,22 @@ class BMSparseMLP:
 
             BLOCK_M = min(128, max(16, BLOCK_M))
             BLOCK_N = min(128, max(16, triton.next_power_of_2(N)))
+            BLOCK_K = min(64, max(32, triton.next_power_of_2(K)))
             
             BLOCK_M = kwargs.pop('BLOCK_M', BLOCK_M)
             BLOCK_N = kwargs.pop('BLOCK_N', BLOCK_N)
-            BLOCK_K = min(64, max(32, triton.next_power_of_2(K)))
-
-            while BLOCK_N * BLOCK_K > 128 * 128 and BLOCK_K > 32:
-                BLOCK_K = BLOCK_K >> 1
-
-            while BLOCK_M * BLOCK_N * BLOCK_K > 128 * 64 * 64 and BLOCK_K > 32:
-                BLOCK_K = BLOCK_K >> 1
-            
             BLOCK_K = kwargs.pop('BLOCK_K', BLOCK_K)
+
+            while not check_shared_memory_gemm(BLOCK_M, BLOCK_N, BLOCK_K, num_stages, dtype.itemsize):
+                if BLOCK_K > 32: BLOCK_K >>= 1
+                elif BLOCK_M > 16: BLOCK_M >>= 1
+                elif BLOCK_N > 32: BLOCK_N >>= 1
+                else: num_stages -= 1
+            
+            while triton.cdiv(M, BLOCK_M) * triton.cdiv(N, BLOCK_N) < num_sm:
+                if BLOCK_M > 16: BLOCK_M >>= 1
+                elif BLOCK_N > 32: BLOCK_N >>= 1
+            
         else:
             BLOCK_M = -1
             BLOCK_N = -1
@@ -619,17 +622,22 @@ class BNSparseMLP:
             if BLOCK_M >= int(M * estimated_sparsity): BLOCK_M = BLOCK_M >> 1
 
             BLOCK_M = min(128, max(16, BLOCK_M))
-            
-            BLOCK_M = kwargs.pop('BLOCK_M', BLOCK_M)
             BLOCK_K = min(64, max(32, triton.next_power_of_2(K)))
 
-            while (BLOCK_M * BLOCK_K >= 128 * 128) or (BLOCK_N * BLOCK_K >= 128 * 128):
-                BLOCK_K = BLOCK_K >> 1
-
-            while BLOCK_M * BLOCK_N * BLOCK_K > 128 * 64 * 64 and BLOCK_K > 32:
-                BLOCK_K = BLOCK_K >> 1
-            
             BLOCK_K = kwargs.pop('BLOCK_K', BLOCK_K)
+            BLOCK_M = kwargs.pop('BLOCK_M', BLOCK_M)
+
+            while not check_shared_memory_gemm(BLOCK_M, BLOCK_N, BLOCK_K, num_stages, dtype.itemsize):
+                if BLOCK_K > 32: BLOCK_K >>= 1
+                elif BLOCK_M > 16: BLOCK_M >>= 1
+                elif BLOCK_N > 32: BLOCK_N >>= 1
+                else: num_stages -= 1
+            
+            while triton.cdiv(M, BLOCK_M) * NG * (G // BLOCK_N) < num_sm:
+                if BLOCK_M > 16: BLOCK_M >>= 1
+                elif BLOCK_N > 32: BLOCK_N >>= 1
+            
+            G_iter = G // BLOCK_N
         else:
             BLOCK_M = -1
             BLOCK_K = -1
@@ -807,13 +815,21 @@ class BKSparseMLP:
             if BLOCK_M >= int(M * estimated_sparsity): BLOCK_M = BLOCK_M >> 1
 
             BLOCK_M = min(128, max(16, BLOCK_M))
-            
-            BLOCK_M = kwargs.pop('BLOCK_M', BLOCK_M)
             BLOCK_N = min(128, max(32, triton.next_power_of_2(N)))
 
-            while BLOCK_M * BLOCK_N * BLOCK_K > 128 * 64 * 64 and BLOCK_N > 32:
-                BLOCK_N = BLOCK_N >> 1
+            while not check_shared_memory_gemm(BLOCK_M, BLOCK_N, BLOCK_K, num_stages, dtype.itemsize):
+                if BLOCK_K > 32: BLOCK_K >>= 1
+                elif BLOCK_M > 16: BLOCK_M >>= 1
+                elif BLOCK_N > 32: BLOCK_N >>= 1
+                else: num_stages -= 1
             
+            while triton.cdiv(M, BLOCK_M) * NG * triton.cdiv(N, BLOCK_N) < num_sm:
+                if BLOCK_M > 16: BLOCK_M >>= 1
+                elif BLOCK_N > 32: BLOCK_N >>= 1
+            
+            G_iter = G // BLOCK_K
+            
+            BLOCK_M = kwargs.pop('BLOCK_M', BLOCK_M)
             BLOCK_N = kwargs.pop('BLOCK_N', BLOCK_N)
         else:
             BLOCK_M = -1

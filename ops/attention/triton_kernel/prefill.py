@@ -7,7 +7,19 @@ import triton.language as tl
 
 from typing import Optional, Tuple, Dict, List, Any
 
-from ops.utils import get_autotune_config, get_autotune_cache
+from ops.utils import get_autotune_config, get_autotune_cache, check_shared_memory_attn
+
+EVT_COMPUTE = tl.constexpr(0)
+EVT_MEMORY = tl.constexpr(1)
+EVT_SYNC = tl.constexpr(2)
+
+# from sm_profiler import SmProfiler
+# from sm_profiler.triton_ops import (
+#     profiler_init,
+#     profiler_event_start,
+#     profiler_event_end,
+#     profiler_event_instant,
+# )
 
 #########################
 # Kernel Implementation
@@ -156,7 +168,6 @@ def query_sort_prefill_impl(
 
         pad_offset_kv = tl.load(pad_offset + batch_id)
         key_length = LK - pad_offset_kv
-
         query_data = tl.load(
             q + (query_batch_offset + query_indices[:, None] * HQ * D + query_head_offset + tl.arange(0, D)[None, :]),
             mask=query_range_mask[:, None],
@@ -177,13 +188,11 @@ def query_sort_prefill_impl(
             # causal mask for each query pos
             causal_mask = query_indices[:, None] >= (tile_kv * BLOCK_N + pad_offset_kv + tl.arange(0, BLOCK_N))[None, :]
             qk = tl.where(causal_mask & (query_range_mask[:, None] & key_range_mask[None, :]), qk, -float('inf'))
-
             value_data = tl.load(
                 v + (key_batch_offset + (tile_kv * BLOCK_N + pad_offset_kv + tl.arange(0, BLOCK_N))[:, None] * HK * D + key_head_offset + tl.arange(0, D)[None, :]),
                 mask=key_range_mask[:, None],
                 other=0.0,
             )
-
             score_max_new = tl.maximum(score_max, tl.max(qk, 1))
             score_scale = tl.exp2(score_max - score_max_new)
             qk = tl.exp2(qk - score_max_new[:, None])
@@ -498,7 +507,7 @@ class DensePrefill:
         # get tiling
         num_sm = torch.cuda.get_device_properties("cuda").multi_processor_count
         cc = torch.cuda.get_device_capability("cuda")[0]
-        num_stages = 2
+        num_stages = 3
         num_warps = 4
 
         BLOCK_M = triton.next_power_of_2(LQ)
@@ -507,6 +516,14 @@ class DensePrefill:
 
         assert D <= 128, f"sm80 style flash_attn head_dim {D} must be <= 128"
         while D == 128 and BLOCK_N >= 128: BLOCK_N = BLOCK_N >> 1
+
+        while not check_shared_memory_attn(BLOCK_M, BLOCK_N, D, num_stages, dtype.itemsize):
+                if BLOCK_N > 32: BLOCK_N >>= 1
+                elif BLOCK_M > 16: BLOCK_M >>= 1
+                else: num_stages -= 1
+            
+        while HQ * B * triton.cdiv(LQ, BLOCK_M) < num_sm:
+            if BLOCK_M > 16: BLOCK_M >>= 1
         
         BLOCK_M = kwargs.pop('BLOCK_M', BLOCK_M)
         BLOCK_N = kwargs.pop('BLOCK_N', BLOCK_N)
@@ -616,7 +633,7 @@ class QuerySparsePrefill:
         # get tiling
         num_sm = torch.cuda.get_device_properties("cuda").multi_processor_count
         cc = torch.cuda.get_device_capability("cuda")[0]
-        num_stages = 2
+        num_stages = 3
         num_warps = 4
 
         if impl == 'auto': impl = 'sort_offline'
@@ -633,6 +650,14 @@ class QuerySparsePrefill:
 
         assert D <= 128, f"sm80 style flash_attn head_dim {D} must be <= 128"
         while D == 128 and BLOCK_N >= 128: BLOCK_N = BLOCK_N >> 1
+
+        while not check_shared_memory_attn(BLOCK_M, BLOCK_N, D, num_stages, dtype.itemsize):
+                if BLOCK_N > 32: BLOCK_N >>= 1
+                elif BLOCK_M > 16: BLOCK_M >>= 1
+                else: num_stages -= 1
+            
+        while HQ * B * triton.cdiv(LQ, BLOCK_M) < num_sm:
+            if BLOCK_M > 16: BLOCK_M >>= 1
         
         BLOCK_M = kwargs.pop('BLOCK_M', BLOCK_M)
         BLOCK_N = kwargs.pop('BLOCK_N', BLOCK_N)
@@ -750,7 +775,7 @@ class GroupSparsePrefill:
         # get tiling
         num_sm = torch.cuda.get_device_properties("cuda").multi_processor_count
         cc = torch.cuda.get_device_capability("cuda")[0]
-        num_stages = 2
+        num_stages = 3
         num_warps = 4
 
         if impl == 'auto': impl = 'sort_offline'
@@ -767,6 +792,14 @@ class GroupSparsePrefill:
 
         assert D <= 128, f"sm80 style flash_attn head_dim {D} must be <= 128"
         while D == 128 and BLOCK_N >= 128: BLOCK_N = BLOCK_N >> 1
+
+        while not check_shared_memory_attn(BLOCK_M, BLOCK_N, D, num_stages, dtype.itemsize):
+                if BLOCK_N > 32: BLOCK_N >>= 1
+                elif BLOCK_M > 16: BLOCK_M >>= 1
+                else: num_stages -= 1
+            
+        while HQ * B * triton.cdiv(LQ, BLOCK_M) < num_sm:
+            if BLOCK_M > 16: BLOCK_M >>= 1
         
         BLOCK_M = kwargs.pop('BLOCK_M', BLOCK_M)
         BLOCK_N = kwargs.pop('BLOCK_N', BLOCK_N)
@@ -882,7 +915,7 @@ class HeadSparsePrefill:
         # get tiling
         num_sm = torch.cuda.get_device_properties("cuda").multi_processor_count
         cc = torch.cuda.get_device_capability("cuda")[0]
-        num_stages = 2
+        num_stages = 3
         num_warps = 4
 
         if impl == 'auto': impl = 'sort_offline'
