@@ -8,6 +8,7 @@ from flash_attn import flash_attn_with_kvcache
 from transformers.cache_utils import Cache
 from transformers.modeling_flash_attention_utils import _flash_attention_forward, flash_attn_supports_top_left_mask
 
+from .triton_kernel.prefill import DensePrefill
 from .triton_kernel.decode import DenseDecode
 
 _use_top_left_mask = flash_attn_supports_top_left_mask()
@@ -50,19 +51,31 @@ class DenseAttentionKernel(_PruningAttentionKernel):
         k: torch.Tensor,
         v: torch.Tensor,
         attention_mask: Optional[torch.Tensor]=None,
+        enable_triton: Optional[bool]=False,
+        **kwargs,
     ):
-        attn_output = _flash_attention_forward(
-            q,
-            k,
-            v,
-            attention_mask,
-            query_length=q.shape[1],
-            is_causal=True,
-            dropout=0.0,
-            softmax_scale=q.shape[-1]**-0.5,
-            use_top_left_mask=_use_top_left_mask,
-            attn_implementation='flash_attention_2',
-        )
+        if enable_triton:
+            attn_output = DensePrefill.kernel(
+                q=q,
+                k=k,
+                v=v,
+                pad_offset=None,
+                impl='auto',
+                **kwargs,
+            )
+        else:
+            attn_output = _flash_attention_forward(
+                q,
+                k,
+                v,
+                attention_mask,
+                query_length=q.shape[1],
+                is_causal=True,
+                dropout=0.0,
+                softmax_scale=q.shape[-1]**-0.5,
+                use_top_left_mask=_use_top_left_mask,
+                attn_implementation='flash_attention_2',
+            )
         return attn_output
     
     @classmethod
