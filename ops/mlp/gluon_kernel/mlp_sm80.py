@@ -124,12 +124,12 @@ def bm_sort_sm80_impl(
     rA_layout: gl.constexpr = gl.DotOperandLayout(
         operand_index=0,
         parent=rD_layout,
-        k_width=32 // 2,
+        k_width=32 // 16,
     )
     rB_layout: gl.constexpr = gl.DotOperandLayout(
         operand_index=1,
         parent=rD_layout,
-        k_width=32 // 2,
+        k_width=32 // 16,
     )
     rD = gl.zeros([BLOCK_M, BLOCK_N], gl.float32, layout=rD_layout)
 
@@ -202,11 +202,6 @@ def bm_sort_sm80_impl(
             )
         
         # epilogue
-        # sD.store(rD.to(dtype))
-        # rD_new = sD.load(mn_layout)
-
-        # mn_r2g_layout: gl.constexpr = gl.BlockedLayout([1, 8], [32 // (BLOCK_K // 8), BLOCK_K // 8], [num_warps, 1], [1, 0])
-        # rIndices = gl.convert_layout(rIndices, gl.SliceLayout(1, mn_r2g_layout), assert_trivial=False)
 
         rD_new = gl.convert_layout(rD, mn_layout, assert_trivial=False)
         gl.store(

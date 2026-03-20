@@ -114,9 +114,11 @@ class StructuredIndex(BaseIndex):
         k: Optional[int]=-1,
         sparsity: Optional[float]=0.5,
         device: Optional[torch.device]=None,
+        rounding_to_even: Optional[bool]=False,
         **kwargs,
     ) -> torch.Tensor:
         k = int(shape[dim] * sparsity) if (k < 1 or k > shape[dim]) else k
+        if rounding_to_even and k % 2 != 0: k += 1 
         indices = random.sample(range(shape[dim]), k=k)
         indices = sorted(indices)
         indices = torch.tensor(indices, device=device) if kwargs.get('return_tensor', True) else indices
@@ -245,6 +247,7 @@ class StructuredIndex(BaseIndex):
                     dim=prune_dim,
                     sparsity=1 - sparsity,
                     device=device,
+                    rounding_to_even=True,
                 )
             
             for module_name in src_targets:
