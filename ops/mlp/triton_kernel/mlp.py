@@ -25,6 +25,7 @@ def bm_sort_mlp_impl(
     N: tl.int64,
     K: tl.int64,
     HAS_BIAS: tl.constexpr,
+    SPLIT_K: tl.constexpr,
     ACTIVATION: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
@@ -32,7 +33,7 @@ def bm_sort_mlp_impl(
     GROUP_SIZE: tl.constexpr,
     IS_OFFLINE: tl.constexpr,
 ):
-    tmid, tnid = tl.program_id(0), tl.program_id(1)
+    tmid, tnid, kid = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     BLOCK_NUM_M, BLOCK_NUM_N = tl.num_programs(0), tl.num_programs(1)
 
     # compute indices in groups
@@ -50,7 +51,7 @@ def bm_sort_mlp_impl(
         )
         skip_flag = tl.reduce_or(query_mask, axis=-1)
 
-    if skip_flag > 0:
+    if skip_flag != 0:
         if IS_OFFLINE:
             bm_indices = tl.load(
                 route_indices + mid * BLOCK_M + tl.arange(0, BLOCK_M),
@@ -67,11 +68,13 @@ def bm_sort_mlp_impl(
                 other=0,
             )
 
+        split_k_size = tl.cdiv(K, SPLIT_K)
+
         bm_offset = bm_indices * K
         bn_offset = nid * BLOCK_N + tl.arange(0, BLOCK_N)
         bn_offset = tl.max_contiguous(tl.multiple_of(bn_offset, BLOCK_N), BLOCK_N)
-        bk_offset = tl.arange(0, BLOCK_K)[None, :]
-        for i in tl.range(0, tl.cdiv(K, BLOCK_K)):
+        bk_offset = kid * BLOCK_K + tl.arange(0, BLOCK_K)[None, :]
+        for i in tl.range(0, tl.cdiv(split_k_size, BLOCK_K)):
             x_data = tl.load(
                 x + bm_offset[:, None] + bk_offset,
                 mask=bk_offset < K,
@@ -84,22 +87,29 @@ def bm_sort_mlp_impl(
             )
 
             acc = tl.dot(x_data, w_data.T, acc=acc)
-
-            bk_offset += BLOCK_K
+            bk_offset += BLOCK_K * SPLIT_K
         
-        if HAS_BIAS:
-            acc += (tl.load(b + bn_offset, mask=bn_offset < N, other=0).to(tl.float32))[None, :]
-        
-        if ACTIVATION == 'silu':
-            acc *= tl.sigmoid(acc)
-        if ACTIVATION == 'relu':
-            acc = tl.maximum(acc, 0)
-        
-        tl.store(
-            out + bm_indices[:, None] * N + bn_offset[None, :],
-            acc.to(x.dtype.element_ty),
-            mask=bm_mask[:, None] & (bn_offset < N)[None, :],
-        )
+        if SPLIT_K == 1:
+            if HAS_BIAS:
+                acc += (tl.load(b + bn_offset, mask=bn_offset < N, other=0).to(tl.float32))[None, :]
+            
+            if ACTIVATION == 'silu':
+                acc *= tl.sigmoid(acc)
+            if ACTIVATION == 'relu':
+                acc = tl.maximum(acc, 0)
+            
+            tl.store(
+                out + bm_indices[:, None] * N + bn_offset[None, :],
+                acc.to(x.dtype.element_ty),
+                mask=bm_mask[:, None] & (bn_offset < N)[None, :],
+            )
+        else:
+            tl.atomic_add(
+                out + bm_indices[:, None] * N + bn_offset[None, :],
+                acc.to(x.dtype.element_ty),
+                mask=bm_mask[:, None] & (bn_offset < N)[None, :],
+                sem='relaxed',
+            )
 
 def bn_sort_mlp_impl(
     x: tl.tensor, # [M, K]
@@ -317,6 +327,7 @@ class BMSparseMLP:
         BLOCK_M: Optional[int]=64,
         BLOCK_N: Optional[int]=32,
         BLOCK_K: Optional[int]=32,
+        SPLIT_K: Optional[int]=1,
         GROUP_SIZE: Optional[int]=4,
         num_stages: Optional[int]=3,
         num_warps: Optional[int]=4,
@@ -344,13 +355,14 @@ class BMSparseMLP:
                 m_sort = m_sort.any(dim=-1)
         
         out = torch.zeros((M, N), dtype=x.dtype, device=x.device)
-        grid = lambda meta: (triton.cdiv(M, meta['BLOCK_M']), triton.cdiv(N, meta['BLOCK_N']))
+        grid = lambda meta: (triton.cdiv(M, meta['BLOCK_M']), triton.cdiv(N, meta['BLOCK_N']), meta['SPLIT_K'])
 
         config = get_autotune_config(
-            params=['BLOCK_M', 'BLOCK_N', 'BLOCK_K', 'GROUP_SIZE', 'num_stages'],
+            params=['BLOCK_M', 'BLOCK_N', 'BLOCK_K', 'SPLIT_K', 'GROUP_SIZE', 'num_stages'],
             BLOCK_M=BLOCK_M,
             BLOCK_N=BLOCK_N,
             BLOCK_K=BLOCK_K,
+            SPLIT_K=SPLIT_K,
             GROUP_SIZE=GROUP_SIZE,
             num_stages=num_stages,
             **kwargs,
@@ -429,18 +441,30 @@ class BMSparseMLP:
             if BLOCK_M >= int(M * estimated_sparsity): BLOCK_M = BLOCK_M >> 1
 
             BLOCK_M = min(128, max(16, BLOCK_M))
-            BLOCK_N = min(128, max(16, triton.next_power_of_2(N)))
+            BLOCK_N = min(128, max(64, triton.next_power_of_2(N)))
             BLOCK_K = min(64, max(32, triton.next_power_of_2(K)))
+
+            SPLIT_K = 1
+            SPLIT_K_list = [1]
 
             while not check_shared_memory_gemm(BLOCK_M, BLOCK_N, BLOCK_K, num_stages, dtype.itemsize):
                 if BLOCK_K > 32: BLOCK_K >>= 1
-                elif BLOCK_N > 32: BLOCK_N >>= 1
+                elif BLOCK_N > 64: BLOCK_N >>= 1
                 elif BLOCK_M > 32: BLOCK_M >>= 1
                 else: num_stages -= 1
             
-            while triton.cdiv(M, BLOCK_M) * triton.cdiv(N, BLOCK_N) < num_sm:
-                if BLOCK_N > 32: BLOCK_N >>= 1
-                elif BLOCK_M > 16: BLOCK_M >>= 1
+            # split-k active
+            if triton.cdiv(M, BLOCK_M) * triton.cdiv(N, BLOCK_N) < num_sm:
+                SPLIT_K_list = [2, 3, 4, 5, 6]
+                min_waste = 1.0
+                best_split_k = 2
+                for split_k in SPLIT_K_list:
+                    waste = float(num_sm - ((triton.cdiv(M, BLOCK_M) * triton.cdiv(N, BLOCK_N) * split_k) % num_sm)) / float(num_sm)
+                    if (min_waste > 0 and waste < min_waste):
+                        min_waste = waste
+                        best_split_k = split_k
+                
+                SPLIT_K = best_split_k
             
             BLOCK_M = kwargs.pop('BLOCK_M', BLOCK_M)
             BLOCK_N = kwargs.pop('BLOCK_N', BLOCK_N)
@@ -460,6 +484,7 @@ class BMSparseMLP:
             BLOCK_M=BLOCK_M,
             BLOCK_N=BLOCK_N,
             BLOCK_K=BLOCK_K,
+            SPLIT_K=SPLIT_K,
             GROUP_SIZE=group_size,
             num_stages=num_stages,
             num_warps=num_warps,
@@ -468,10 +493,10 @@ class BMSparseMLP:
             BLOCK_M_list=[16, 32, 64, 128],
             BLOCK_N_list=[64, 128],
             BLOCK_K_list=[32, 64],
+            SPLIT_K_list=SPLIT_K_list,
             num_stages_list=[2, 3],
             **kwargs
         )
-
 
 class BNSparseMLP:
 

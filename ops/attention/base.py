@@ -117,7 +117,7 @@ class DenseAttentionKernel(_PruningAttentionKernel):
         pad_offset: Optional[torch.Tensor]=None,
         prefill_impl: Optional[str]='',
         decode_impl: Optional[str]='',
-        enable_autotune: Optional[bool]=True,
+        enable_autotune: Optional[bool]=False,
         enable_xqa: Optional[bool]=True,
         **kwargs,
     ):
