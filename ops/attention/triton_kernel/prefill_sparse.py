@@ -6,7 +6,7 @@ import triton
 import triton.language as tl
 
 from typing import Optional, Tuple, Dict, List, Any
-from ops.utils import get_autotune_config, get_autotune_cache
+from ops.utils import get_autotune_config, get_autotune_cache, check_shared_memory_attn
 
 ##############################################################
 # Sparse Attention (Online skip PV based on local metrics)
@@ -184,12 +184,19 @@ class PVSparsePrefill:
         num_warps = 4
 
         BLOCK_M = triton.next_power_of_2(LQ)
-        BLOCK_M = min(64, max(16, BLOCK_M))
+        BLOCK_M = min(128, max(16, BLOCK_M))
         BLOCK_N = min(64, max(16, triton.next_power_of_2(LQ)))
-        
-        BLOCK_M = kwargs.pop('BLOCK_M', BLOCK_M)
         BLOCK_N = kwargs.pop('BLOCK_N', BLOCK_N)
         BLOCK_N = kwargs.pop('block_size', BLOCK_N)
+
+        while not check_shared_memory_attn(BLOCK_M, BLOCK_N, D, num_stages, dtype.itemsize):
+            if BLOCK_M > 32: BLOCK_M >>= 1
+            else: num_stages -= 1
+            
+        while HQ * B * triton.cdiv(LQ, BLOCK_M) < num_sm:
+            if BLOCK_M > 16: BLOCK_M >>= 1
+        
+        BLOCK_M = kwargs.pop('BLOCK_M', BLOCK_M)
 
         if impl not in cls.support_kernel:
             raise ValueError(f"{impl} is not supported")

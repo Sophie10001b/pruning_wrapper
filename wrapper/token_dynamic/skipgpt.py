@@ -209,9 +209,12 @@ class SkipGPTAttention(nn.Module):
             for key in ['q_proj', 'o_proj']:
                 attr = getattr(self, f'{key}_kwargs', {})
                 attr['pruning_type'] = 'bm'
+                attr['estimated_sparsity'] = self.attention_kwargs['estimated_sparsity']
         elif self.attention_kwargs['pruning_type'] in ['group', 'head']:
             self.q_proj_kwargs['pruning_type'] = 'bn'
+            self.q_proj_kwargs['estimated_sparsity'] = self.attention_kwargs['estimated_sparsity']
             self.o_proj_kwargs['pruning_type'] = 'bk'
+            self.o_proj_kwargs['estimated_sparsity'] = self.attention_kwargs['estimated_sparsity']
 
         # attention pruning impl
         self.q_proj_impl = None
@@ -267,7 +270,7 @@ class SkipGPTAttention(nn.Module):
                     hidden_states,
                     w_up=self.k_proj.weight,
                     b_up=self.k_proj.bias,
-                    route_mask=pruning_kwargs.get('k_proj', None),
+                    route_mask=pruning_kwargs.get('k_proj', route_mask),
                     **getattr(self, f'k_proj_kwargs', {}),
                 )
             with nvtx.annotate("v_proj", color='blue'):
@@ -275,7 +278,7 @@ class SkipGPTAttention(nn.Module):
                     hidden_states,
                     w_up=self.v_proj.weight,
                     b_up=self.v_proj.bias,
-                    route_mask=pruning_kwargs.get('v_proj', None),
+                    route_mask=pruning_kwargs.get('v_proj', route_mask),
                     **getattr(self, f'v_proj_kwargs', {}),
                 )
 

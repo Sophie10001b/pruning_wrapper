@@ -413,10 +413,12 @@ class BMSparseMLP:
         num_warps = 4
         group_size = 4
 
-        estimated_sparsity = kwargs.pop('estimated_sparsity', 0)
+        estimated_sparsity = kwargs.pop('estimated_sparsity', 1)
         if route_mask is None:
             estimated_sparsity = 1
             route_mask = torch.ones((B, L), dtype=torch.bool, device=device)
+        
+        if estimated_sparsity == 0: estimated_sparsity = 1
         
         if impl == 'auto': # auto dispatch
             if route_mask is None: impl = 'dense'
@@ -427,22 +429,22 @@ class BMSparseMLP:
             if BLOCK_M >= int(M * estimated_sparsity): BLOCK_M = BLOCK_M >> 1
 
             BLOCK_M = min(128, max(16, BLOCK_M))
-            BLOCK_N = min(256, max(16, triton.next_power_of_2(N)))
+            BLOCK_N = min(128, max(16, triton.next_power_of_2(N)))
             BLOCK_K = min(64, max(32, triton.next_power_of_2(K)))
+
+            while not check_shared_memory_gemm(BLOCK_M, BLOCK_N, BLOCK_K, num_stages, dtype.itemsize):
+                if BLOCK_K > 32: BLOCK_K >>= 1
+                elif BLOCK_N > 32: BLOCK_N >>= 1
+                elif BLOCK_M > 32: BLOCK_M >>= 1
+                else: num_stages -= 1
+            
+            while triton.cdiv(M, BLOCK_M) * triton.cdiv(N, BLOCK_N) < num_sm:
+                if BLOCK_N > 32: BLOCK_N >>= 1
+                elif BLOCK_M > 16: BLOCK_M >>= 1
             
             BLOCK_M = kwargs.pop('BLOCK_M', BLOCK_M)
             BLOCK_N = kwargs.pop('BLOCK_N', BLOCK_N)
             BLOCK_K = kwargs.pop('BLOCK_K', BLOCK_K)
-
-            while not check_shared_memory_gemm(BLOCK_M, BLOCK_N, BLOCK_K, num_stages, dtype.itemsize):
-                if BLOCK_K > 32: BLOCK_K >>= 1
-                elif BLOCK_M > 16: BLOCK_M >>= 1
-                elif BLOCK_N > 32: BLOCK_N >>= 1
-                else: num_stages -= 1
-            
-            while triton.cdiv(M, BLOCK_M) * triton.cdiv(N, BLOCK_N) < num_sm:
-                if BLOCK_M > 16: BLOCK_M >>= 1
-                elif BLOCK_N > 32: BLOCK_N >>= 1
             
         else:
             BLOCK_M = -1
@@ -599,12 +601,14 @@ class BNSparseMLP:
         num_warps = 4
         group_size = 4
 
-        estimated_sparsity = kwargs.pop('estimated_sparsity', 0)
+        estimated_sparsity = kwargs.pop('estimated_sparsity', 1)
         if route_mask is None:
             estimated_sparsity = 1
             BLOCK_N = 32
             NG = N // BLOCK_N
             route_mask = torch.ones((B, L, NG), dtype=torch.bool, device=device)
+        
+        if estimated_sparsity == 0: estimated_sparsity = 1
         
         if impl == 'auto': # auto dispatch
             if route_mask is None: impl = 'dense'
@@ -624,18 +628,18 @@ class BNSparseMLP:
             BLOCK_M = min(128, max(16, BLOCK_M))
             BLOCK_K = min(64, max(32, triton.next_power_of_2(K)))
 
-            BLOCK_K = kwargs.pop('BLOCK_K', BLOCK_K)
-            BLOCK_M = kwargs.pop('BLOCK_M', BLOCK_M)
-
             while not check_shared_memory_gemm(BLOCK_M, BLOCK_N, BLOCK_K, num_stages, dtype.itemsize):
                 if BLOCK_K > 32: BLOCK_K >>= 1
-                elif BLOCK_M > 16: BLOCK_M >>= 1
                 elif BLOCK_N > 32: BLOCK_N >>= 1
+                elif BLOCK_M > 32: BLOCK_M >>= 1
                 else: num_stages -= 1
             
             while triton.cdiv(M, BLOCK_M) * NG * (G // BLOCK_N) < num_sm:
-                if BLOCK_M > 16: BLOCK_M >>= 1
-                elif BLOCK_N > 32: BLOCK_N >>= 1
+                if BLOCK_N > 32: BLOCK_N >>= 1
+                elif BLOCK_M > 16: BLOCK_M >>= 1
+            
+            BLOCK_K = kwargs.pop('BLOCK_K', BLOCK_K)
+            BLOCK_M = kwargs.pop('BLOCK_M', BLOCK_M)
             
             G_iter = G // BLOCK_N
         else:
@@ -792,12 +796,14 @@ class BKSparseMLP:
         num_warps = 4
         group_size = 4
 
-        estimated_sparsity = kwargs.pop('estimated_sparsity', 0)
+        estimated_sparsity = kwargs.pop('estimated_sparsity', 1)
         if route_mask is None:
             estimated_sparsity = 1
             BLOCK_K = 32
             NG = K // BLOCK_K
             route_mask = torch.ones((B, L, NG), dtype=torch.bool, device=device)
+        
+        if estimated_sparsity == 0: estimated_sparsity = 1
         
         if impl == 'auto': # auto dispatch
             if cc < 9 and dtype == torch.bfloat16: raise ValueError("bfloat16 atomic add is not supported on cc < 9")
@@ -815,22 +821,22 @@ class BKSparseMLP:
             if BLOCK_M >= int(M * estimated_sparsity): BLOCK_M = BLOCK_M >> 1
 
             BLOCK_M = min(128, max(16, BLOCK_M))
-            BLOCK_N = min(256, max(32, triton.next_power_of_2(N)))
+            BLOCK_N = min(128, max(32, triton.next_power_of_2(N)))
 
             while not check_shared_memory_gemm(BLOCK_M, BLOCK_N, BLOCK_K, num_stages, dtype.itemsize):
                 if BLOCK_K > 32: BLOCK_K >>= 1
-                elif BLOCK_M > 16: BLOCK_M >>= 1
                 elif BLOCK_N > 32: BLOCK_N >>= 1
+                elif BLOCK_M > 32: BLOCK_M >>= 1
                 else: num_stages -= 1
             
             while triton.cdiv(M, BLOCK_M) * NG * triton.cdiv(N, BLOCK_N) < num_sm:
-                if BLOCK_M > 16: BLOCK_M >>= 1
-                elif BLOCK_N > 32: BLOCK_N >>= 1
-            
-            G_iter = G // BLOCK_K
+                if BLOCK_N > 32: BLOCK_N >>= 1
+                elif BLOCK_M > 16: BLOCK_M >>= 1
             
             BLOCK_M = kwargs.pop('BLOCK_M', BLOCK_M)
             BLOCK_N = kwargs.pop('BLOCK_N', BLOCK_N)
+            G_iter = G // BLOCK_K
+            
         else:
             BLOCK_M = -1
             BLOCK_N = -1

@@ -507,19 +507,19 @@ class DensePrefill:
         # get tiling
         num_sm = torch.cuda.get_device_properties("cuda").multi_processor_count
         cc = torch.cuda.get_device_capability("cuda")[0]
-        num_stages = 3
+        num_stages = 2
         num_warps = 4
 
         BLOCK_M = triton.next_power_of_2(LQ)
-        BLOCK_M = min(64, max(16, BLOCK_M))
-        BLOCK_N = min(128, max(16, triton.next_power_of_2(LQ)))
+        BLOCK_M = min(128, max(16, BLOCK_M))
+        BLOCK_N = min(64, max(16, triton.next_power_of_2(LQ)))
 
         assert D <= 128, f"sm80 style flash_attn head_dim {D} must be <= 128"
 
         while not check_shared_memory_attn(BLOCK_M, BLOCK_N, D, num_stages, dtype.itemsize):
-                if BLOCK_N > 32: BLOCK_N >>= 1
-                elif BLOCK_M > 16: BLOCK_M >>= 1
-                else: num_stages -= 1
+            if BLOCK_N > 32: BLOCK_N >>= 1
+            elif BLOCK_M > 32: BLOCK_M >>= 1
+            else: num_stages -= 1
             
         while HQ * B * triton.cdiv(LQ, BLOCK_M) < num_sm:
             if BLOCK_M > 16: BLOCK_M >>= 1
@@ -534,7 +534,7 @@ class DensePrefill:
             num_warps=num_warps,
             pad_offset=pad_offset,
             BLOCK_M_list=[16, 32, 64],
-            BLOCK_N_list=[16, 32, 64, 128],
+            BLOCK_N_list=[32, 64],
             num_stages_list=[2, 3],
             **kwargs
         )
@@ -632,27 +632,29 @@ class QuerySparsePrefill:
         # get tiling
         num_sm = torch.cuda.get_device_properties("cuda").multi_processor_count
         cc = torch.cuda.get_device_capability("cuda")[0]
-        num_stages = 3
+        num_stages = 2
         num_warps = 4
 
         if impl == 'auto': impl = 'sort_offline'
 
-        estimated_sparsity = kwargs.pop('estimated_sparsity', 0)
+        estimated_sparsity = kwargs.pop('estimated_sparsity', 1)
         if route_mask is None:
             estimated_sparsity = 1
             route_mask = torch.ones((B, LQ), dtype=torch.bool, device=device)
+        
+        if estimated_sparsity == 0: estimated_sparsity = 1
 
         BLOCK_M = triton.next_power_of_2(int(LQ * estimated_sparsity))
         if BLOCK_M >= int(LQ * estimated_sparsity): BLOCK_M = BLOCK_M >> 1
-        BLOCK_M = min(64, max(16, BLOCK_M))
-        BLOCK_N = min(128, max(16, triton.next_power_of_2(LQ)))
+        BLOCK_M = min(128, max(16, BLOCK_M))
+        BLOCK_N = min(64, max(16, triton.next_power_of_2(LQ)))
 
         assert D <= 128, f"sm80 style flash_attn head_dim {D} must be <= 128"
 
         while not check_shared_memory_attn(BLOCK_M, BLOCK_N, D, num_stages, dtype.itemsize):
-                if BLOCK_N > 32: BLOCK_N >>= 1
-                elif BLOCK_M > 16: BLOCK_M >>= 1
-                else: num_stages -= 1
+            if BLOCK_N > 32: BLOCK_N >>= 1
+            elif BLOCK_M > 32: BLOCK_M >>= 1
+            else: num_stages -= 1
             
         while HQ * B * triton.cdiv(LQ, BLOCK_M) < num_sm:
             if BLOCK_M > 16: BLOCK_M >>= 1
@@ -674,7 +676,7 @@ class QuerySparsePrefill:
             pad_offset=pad_offset,
             is_offline=is_offline,
             BLOCK_M_list=[16, 32, 64],
-            BLOCK_N_list=[16, 32, 64, 128],
+            BLOCK_N_list=[32, 64],
             num_stages_list=[2, 3],
             **kwargs
         )
@@ -773,27 +775,29 @@ class GroupSparsePrefill:
         # get tiling
         num_sm = torch.cuda.get_device_properties("cuda").multi_processor_count
         cc = torch.cuda.get_device_capability("cuda")[0]
-        num_stages = 3
+        num_stages = 2
         num_warps = 4
 
         if impl == 'auto': impl = 'sort_offline'
 
-        estimated_sparsity = kwargs.pop('estimated_sparsity', 0)
+        estimated_sparsity = kwargs.pop('estimated_sparsity', 1)
         if route_mask is None:
             estimated_sparsity = 1
             route_mask = torch.ones((B, LQ, HK), dtype=torch.bool, device=device)
+        
+        if estimated_sparsity == 0: estimated_sparsity = 1
 
         BLOCK_M = triton.next_power_of_2(int(LQ * estimated_sparsity))
         if BLOCK_M >= int(LQ * estimated_sparsity): BLOCK_M = BLOCK_M >> 1
-        BLOCK_M = min(64, max(16, BLOCK_M))
-        BLOCK_N = min(128, max(16, triton.next_power_of_2(LQ)))
+        BLOCK_M = min(128, max(16, BLOCK_M))
+        BLOCK_N = min(64, max(16, triton.next_power_of_2(LQ)))
 
         assert D <= 128, f"sm80 style flash_attn head_dim {D} must be <= 128"
 
         while not check_shared_memory_attn(BLOCK_M, BLOCK_N, D, num_stages, dtype.itemsize):
-                if BLOCK_N > 32: BLOCK_N >>= 1
-                elif BLOCK_M > 16: BLOCK_M >>= 1
-                else: num_stages -= 1
+            if BLOCK_N > 32: BLOCK_N >>= 1
+            elif BLOCK_M > 32: BLOCK_M >>= 1
+            else: num_stages -= 1
             
         while HQ * B * triton.cdiv(LQ, BLOCK_M) < num_sm:
             if BLOCK_M > 16: BLOCK_M >>= 1
@@ -815,7 +819,7 @@ class GroupSparsePrefill:
             pad_offset=pad_offset,
             is_offline=is_offline,
             BLOCK_M_list=[16, 32, 64],
-            BLOCK_N_list=[16, 32, 64, 128],
+            BLOCK_N_list=[32, 64],
             num_stages_list=[2, 3],
             **kwargs
         )
@@ -912,22 +916,32 @@ class HeadSparsePrefill:
         # get tiling
         num_sm = torch.cuda.get_device_properties("cuda").multi_processor_count
         cc = torch.cuda.get_device_capability("cuda")[0]
-        num_stages = 3
+        num_stages = 2
         num_warps = 4
 
         if impl == 'auto': impl = 'sort_offline'
 
-        estimated_sparsity = kwargs.pop('estimated_sparsity', 0)
+        estimated_sparsity = kwargs.pop('estimated_sparsity', 1)
         if route_mask is None:
             estimated_sparsity = 1
             route_mask = torch.ones((B, LQ, HQ), dtype=torch.bool, device=device)
+        
+        if estimated_sparsity == 0: estimated_sparsity = 1
 
         BLOCK_M = triton.next_power_of_2(int(LQ * estimated_sparsity))
         if BLOCK_M >= int(LQ * estimated_sparsity): BLOCK_M = BLOCK_M >> 1
-        BLOCK_M = min(64, max(16, BLOCK_M))
-        BLOCK_N = min(128, max(16, triton.next_power_of_2(LQ)))
+        BLOCK_M = min(128, max(16, BLOCK_M))
+        BLOCK_N = min(64, max(16, triton.next_power_of_2(LQ)))
 
         assert D <= 128, f"sm80 style flash_attn head_dim {D} must be <= 128"
+
+        while not check_shared_memory_attn(BLOCK_M, BLOCK_N, D, num_stages, dtype.itemsize):
+            if BLOCK_N > 32: BLOCK_N >>= 1
+            elif BLOCK_M > 32: BLOCK_M >>= 1
+            else: num_stages -= 1
+            
+        while HQ * B * triton.cdiv(LQ, BLOCK_M) < num_sm:
+            if BLOCK_M > 16: BLOCK_M >>= 1
         
         BLOCK_M = kwargs.pop('BLOCK_M', BLOCK_M)
         BLOCK_N = kwargs.pop('BLOCK_N', BLOCK_N)
@@ -946,7 +960,7 @@ class HeadSparsePrefill:
             pad_offset=pad_offset,
             is_offline=is_offline,
             BLOCK_M_list=[16, 32, 64],
-            BLOCK_N_list=[16, 32, 64, 128],
+            BLOCK_N_list=[32, 64],
             num_stages_list=[2, 3],
             **kwargs
         )

@@ -1,5 +1,5 @@
 print_autotune=1
-nsys_profile=1
+nsys_profile=0
 model_name=llama3.1-8b
 model_path=/home/hk-project-p0022189/tum_yvc3016/anhao/haozhe/modelscope_cache/models/LLM-Research/Meta-Llama-3.1-8B
 
@@ -7,8 +7,8 @@ dynamic=static
 style=dense
 config_name=dense
 
-benchmark_metric=tpot
-num_repeat=3
+benchmark_metric=ttft
+num_repeat=20
 sparsity=0.5
 
 batch_size=(1)
@@ -27,8 +27,8 @@ if [[ $nsys_profile == 0 ]]; then
         --sparsity $sparsity \
         --batch_size ${batch_size[@]} \
         --seq_len ${seq_len[@]} \
-        --cuda_graph \
-        --liger_kernel
+        --liger_kernel \
+        --cuda_graph
 
 else
     nsys_prefix="${benchmark_metric}_${batch_size[0]}_${seq_len[0]}_${dynamic}_${style}_${config_name}_${sparsity}"
