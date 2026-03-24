@@ -59,6 +59,11 @@ def blasst_decode_impl(
 
     split_n_range = tl.cdiv(key_length, BLOCK_N)
     for tile_n in tl.range(0, split_n_range):
+        is_greater_than_threshold = 1
+        if predefined_skip:
+            need_execute = tl.load(execute_block + tile_n)
+            is_greater_than_threshold &= (need_execute == 1)
+        
         key_range_mask = ((tile_n * BLOCK_N + tl.arange(0, BLOCK_N)) < key_length)
         key_data = tl.load(
             k + ((start_k + tile_n * BLOCK_N + tl.arange(0, BLOCK_N)) * HK * D + key_head_id * D)[:, None] + tl.arange(0, D)[None, :],
@@ -73,11 +78,7 @@ def blasst_decode_impl(
         # scalar
         score_local_max = tl.max(qk, 1)
         score_max_new = tl.maximum(score_max, score_local_max)
-        is_greater_than_threshold = tl.reduce_or(tl.exp2(score_max_new - score_local_max) * score_scale > threshold, axis=0)
-
-        if predefined_skip:
-            need_execute = tl.load(execute_block + tile_n)
-            is_greater_than_threshold &= (need_execute == 1)
+        is_greater_than_threshold &= tl.reduce_or(tl.exp2(score_max_new - score_local_max) * score_scale > threshold, axis=0)
         
         if is_greater_than_threshold:
             value_data = tl.load(

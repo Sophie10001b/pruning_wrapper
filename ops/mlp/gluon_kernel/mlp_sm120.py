@@ -5,11 +5,67 @@ import triton.experimental.gluon.language as gl
 
 from typing import Optional, Tuple, Dict, List, Any
 from einops import rearrange
+from triton.language.core import _aggregate as aggregate
 from triton.experimental.gluon.nvidia.hopper import TensorDescriptor
 from triton.experimental.gluon.language.nvidia.ampere import mma_v2
 from triton.experimental.gluon.language.nvidia.blackwell import (tma, mbarrier, fence_async_shared)
 
 from ops.utils import get_autotune_config, get_autotune_cache, check_shared_memory_gemm
+
+# SM120 gather & scatter fuse gemm, with TMA gather4 load A, TMA load B, and sm80 mma
+
+@aggregate
+class GEMMConfig:
+    BLOCK_M: gl.constexpr
+    BLOCK_N: gl.constexpr
+    BLOCK_K: gl.constexpr
+    SPLIT_K: gl.constexpr
+    GROUP_SIZE: gl.constexpr
+    num_stages: gl.constexpr
+    num_warps: gl.constexpr
+
+    mma_layout: gl.constexpr
+    rA_layout: gl.constexpr
+    rB_layout: gl.constexpr
+
+    sA_layout: gl.constexpr
+    sB_layout: gl.constexpr
+
+    dtype: gl.constexpr
+
+    @gluon.constexpr_function
+    def __init__(self, BLOCK_M, BLOCK_N, BLOCK_K, SPLIT_K, GROUP_SIZE, num_stages, num_warps, dtype):
+        self.BLOCK_M = gl.constexpr(BLOCK_M)
+        self.BLOCK_N = gl.constexpr(BLOCK_N)
+        self.BLOCK_K = gl.constexpr(BLOCK_K)
+        self.SPLIT_K = gl.constexpr(SPLIT_K)
+        self.GROUP_SIZE = gl.constexpr(GROUP_SIZE)
+        self.num_stages = gl.constexpr(num_stages)
+        self.num_warps = gl.constexpr(num_warps)
+        self.dtype = gl.constexpr(dtype)
+        
+        mma_col: gl.constexpr = 2 if self.BLOCK_K == 32 else 4
+        mma_row: gl.constexpr = self.num_warps // mma_col
+
+        self.mma_layout = gl.constexpr(gl.NVMMADistributedLayout(
+            version=[2, 0],
+            warps_per_cta=[mma_row, mma_col],
+            instr_shape=[16, 8],
+        ))
+        self.rA_layout = gl.constexpr(gl.DotOperandLayout(
+            operand_index=0,
+            parent=self.mma_layout,
+            k_width=2,
+        ))
+        self.rB_layout = gl.constexpr(gl.DotOperandLayout(
+            operand_index=1,
+            parent=self.mma_layout,
+            k_width=2,
+        ))
+
+        self.sA_layout = gl.constexpr(gl.NVMMASharedLayout.get_default_for([self.BLOCK_M, self.BLOCK_K], self.dtype))
+        self.sB_layout = gl.constexpr(gl.NVMMASharedLayout.get_default_for([self.BLOCK_N, self.BLOCK_K], self.dtype))
+
 
 @gluon.jit
 def swizzle_l2(i, j, size_i, size_j, size_g):
@@ -33,7 +89,7 @@ def swizzle_l2(i, j, size_i, size_j, size_g):
 
 @gluon.jit
 def issue_load_AB(
-    producer: gl.uint32,
+    producer: gl.int64,
     mA_desc: tma.tensor_descriptor,
     mB_desc: tma.tensor_descriptor,
     sA: gl.shared_memory_descriptor,
@@ -67,7 +123,7 @@ def issue_load_AB(
 
 @gluon.jit
 def issue_mma(
-    consumer: gl.uint32,
+    consumer: gl.int64,
     sA: gl.shared_memory_descriptor,
     sB: gl.shared_memory_descriptor,
     bars: gl.shared_memory_descriptor,
@@ -88,9 +144,6 @@ def issue_mma(
 
     rD = mma_v2(rA, rB, rD)
     return consumer, rD
-
-# SM120 gather & scatter fuse gemm, with TMA gather4 load A, TMA load B, sm80 wmma run A@B, and
-# store to D (not support scatter4). Pipeline style is under sm80, without persist / WS trick.
 
 def bm_sort_sm120_impl(
     mA_desc: tma.tensor_descriptor,
@@ -115,13 +168,12 @@ def bm_sort_sm120_impl(
     bdimx, bdimy = gl.num_programs(0), gl.num_programs(1)
 
     bidx, bidy = swizzle_l2(bidx, bidy, bdimx, bdimy, GROUP_SIZE)
+    cfg = GEMMConfig(BLOCK_M, BLOCK_N, BLOCK_K, SPLIT_K, GROUP_SIZE, num_stages, num_warps, mA_desc.dtype)
 
-    dtype: gl.constexpr = mA_desc.dtype
-    sA = gl.allocate_shared_memory(dtype, [num_stages, BLOCK_M, BLOCK_K], mA_desc.layout)
-    sB = gl.allocate_shared_memory(dtype, [num_stages, BLOCK_N, BLOCK_K], mB_desc.layout)
-    # sD = gl.allocate_shared_memory(dtype, [BLOCK_M, BLOCK_N], mD_desc.layout)
-    
-    bars = gl.allocate_shared_memory(gl.uint64, [num_stages, 1], mbarrier.MBarrierLayout())
+    sA = gl.allocate_shared_memory(cfg.dtype, [num_stages, BLOCK_M, BLOCK_K], cfg.sA_layout)
+    sB = gl.allocate_shared_memory(cfg.dtype, [num_stages, BLOCK_N, BLOCK_K], cfg.sB_layout)
+
+    bars = gl.allocate_shared_memory(gl.int64, [num_stages, 1], mbarrier.MBarrierLayout())
     for i in gl.static_range(num_stages):
         mbarrier.init(bars.index(i), count=1)
     
@@ -131,28 +183,11 @@ def bm_sort_sm120_impl(
     split_k_size = gl.cdiv(K, SPLIT_K)
     num_k_tile = gl.cdiv(split_k_size, BLOCK_K)
 
-    producer: gl.uint32 = 0
-    consumer: gl.uint32 = 0
+    producer: gl.int64 = 0
+    consumer: gl.int64 = 0
     
     # mma register layout per warp & thread
-    mma_col: gl.constexpr = 2 if BLOCK_K == 32 else 4
-    mma_row: gl.constexpr = num_warps // mma_col
-    rD_layout: gl.constexpr = gl.NVMMADistributedLayout(
-        version=[2, 0],
-        warps_per_cta=[mma_row, mma_col],
-        instr_shape=[16, 8] # m16n8k8
-    )
-    rA_layout: gl.constexpr = gl.DotOperandLayout(
-        operand_index=0,
-        parent=rD_layout,
-        k_width=32 // dtype.primitive_bitwidth,
-    )
-    rB_layout: gl.constexpr = gl.DotOperandLayout(
-        operand_index=1,
-        parent=rD_layout,
-        k_width=32 // dtype.primitive_bitwidth,
-    )
-    rD = gl.zeros([BLOCK_M, BLOCK_N], gl.float32, layout=rD_layout)
+    rD = gl.zeros([BLOCK_M, BLOCK_N], gl.float32, layout=cfg.mma_layout)
 
     # issue mask & index
     mn_layout: gl.constexpr = gl.BlockedLayout([4, 1], [1, 32], [num_warps, 1], [1, 0])
@@ -183,30 +218,27 @@ def bm_sort_sm120_impl(
             )
 
         # prologue, issues first pipe - 1 loading
-        current_k = 0
         for k in gl.static_range(0, num_stages - 1):
             producer = issue_load_AB(
                 producer,
                 mA_desc, mB_desc, sA, sB, bars,
-                n_base, k_base + current_k * BLOCK_K * SPLIT_K, rIndices,
+                n_base, k_base + producer * BLOCK_K * SPLIT_K, rIndices,
                 BLOCK_M, num_stages,
             )
-            current_k += 1
         
         # mainloop, issue wmma
         for k in range(0, num_k_tile - (num_stages - 1)):
             producer = issue_load_AB(
                 producer,
                 mA_desc, mB_desc, sA, sB, bars,
-                n_base, k_base + current_k * BLOCK_K * SPLIT_K, rIndices,
+                n_base, k_base + producer * BLOCK_K * SPLIT_K, rIndices,
                 BLOCK_M, num_stages,
             )
-            current_k += 1
 
             consumer, rD = issue_mma(
                 consumer,
                 sA, sB, bars,
-                rA_layout, rB_layout, rD,
+                cfg.rA_layout, cfg.rB_layout, rD,
                 num_stages,
             )
         
@@ -215,7 +247,7 @@ def bm_sort_sm120_impl(
             consumer, rD = issue_mma(
                 consumer,
                 sA, sB, bars,
-                rA_layout, rB_layout, rD,
+                cfg.rA_layout, cfg.rB_layout, rD,
                 num_stages,
             )
 
@@ -260,10 +292,10 @@ class BMSparseMLP:
         x: torch.Tensor,
         route_mask: torch.Tensor,
         w: torch.Tensor,
-        b: Optional[torch.Tensor]=None,
         BLOCK_M: Optional[int]=64,
         BLOCK_N: Optional[int]=32,
         BLOCK_K: Optional[int]=32,
+        SPLIT_K: Optional[int]=1,
         GROUP_SIZE: Optional[int]=4,
         num_stages: Optional[int]=3,
         num_warps: Optional[int]=4,
@@ -292,7 +324,7 @@ class BMSparseMLP:
                 m_sort = m_sort.any(dim=-1)
         
         out = torch.zeros((M, N), dtype=x.dtype, device=x.device)
-        grid = lambda meta: (triton.cdiv(M, meta['BLOCK_M']), triton.cdiv(N, meta['BLOCK_N']))
+        grid = lambda meta: (triton.cdiv(M, meta['BLOCK_M']), triton.cdiv(N, meta['BLOCK_N']), meta['SPLIT_K'])
 
         # tma descriptor
         gl_dtype = getattr(gl, str(x_flat.dtype).split('.')[1])
@@ -303,7 +335,11 @@ class BMSparseMLP:
         B_desc = TensorDescriptor.from_tensor(w, [BLOCK_N, BLOCK_K], B_desc_layout)
 
         config = get_autotune_config(
-            params=['GROUP_SIZE', 'num_stages'],
+            params=['BLOCK_M', 'BLOCK_N', 'BLOCK_K', 'SPLIT_K', 'GROUP_SIZE', 'num_stages'],
+            BLOCK_M=BLOCK_M,
+            BLOCK_N=BLOCK_N,
+            BLOCK_K=BLOCK_K,
+            SPLIT_K=SPLIT_K,
             GROUP_SIZE=GROUP_SIZE,
             num_stages=num_stages,
             **kwargs,
@@ -317,11 +353,9 @@ class BMSparseMLP:
         )
         kernel[grid](
             A_desc, B_desc, out,
-            m_sort, m_sort_indices.to(torch.uint32),
+            m_sort, m_sort_indices.to(torch.int32),
             M, N, K,
-            BLOCK_M=BLOCK_M,
-            BLOCK_N=BLOCK_N,
-            BLOCK_K=BLOCK_K,
+            ACTIVATION=kwargs.get('activation', 'identity'),
             IS_OFFLINE=kwargs.get('is_offline', False),
         )
 

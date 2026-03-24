@@ -60,6 +60,11 @@ def blasst_prefill_impl(
 
     num_kv_iter = tl.cdiv((query_id + 1) * BLOCK_M - pad_offset_kv + 1, BLOCK_N)
     for tile_kv in tl.range(0, num_kv_iter):
+        is_greater_than_threshold = 1
+        if predefined_skip:
+            need_execute = tl.load(execute_block + tile_kv)
+            is_greater_than_threshold &= (need_execute == 1)
+
         key_seq_range = tile_kv * BLOCK_N + tl.arange(0, BLOCK_N) + pad_offset_kv
         key_range_mask = key_seq_range < key_length
         key_data = tl.load(
@@ -75,11 +80,7 @@ def blasst_prefill_impl(
 
         score_local_max = tl.max(qk, 1)
         score_max_new = tl.maximum(score_max, score_local_max)
-        is_greater_than_threshold = tl.reduce_or(tl.exp2(score_max_new - score_local_max) * score_scale > threshold, axis=0)
-
-        if predefined_skip:
-            need_execute = tl.load(execute_block + tile_kv)
-            is_greater_than_threshold &= (need_execute == 1)
+        is_greater_than_threshold &= tl.reduce_or(tl.exp2(score_max_new - score_local_max) * score_scale > threshold, axis=0)
 
         if is_greater_than_threshold: # continue load V on smem and compute PV
             value_data = tl.load(
