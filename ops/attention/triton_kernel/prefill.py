@@ -654,10 +654,12 @@ class QuerySparsePrefill:
         while not check_shared_memory_attn(BLOCK_M, BLOCK_N, D, num_stages, dtype.itemsize):
             if BLOCK_N > 32: BLOCK_N >>= 1
             elif BLOCK_M > 32: BLOCK_M >>= 1
-            else: num_stages -= 1
+            elif num_stages > 2: num_stages -= 1
+            else: break
             
         while HQ * B * triton.cdiv(LQ, BLOCK_M) < num_sm:
             if BLOCK_M > 16: BLOCK_M >>= 1
+            else: break
         
         BLOCK_M = kwargs.pop('BLOCK_M', BLOCK_M)
         BLOCK_N = kwargs.pop('BLOCK_N', BLOCK_N)

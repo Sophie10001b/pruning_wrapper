@@ -109,6 +109,7 @@ class ModelProfiler:
             estimated_sparsity=kwargs.get('sparsity', 0.0),
             use_cuda_graph=cuda_graph,
             kv_cache_len=seq_len,
+            num_tokens=dummy_inputs.numel(),
         )
         
         device_interface = runtime.driver.active.get_device_interface()
@@ -137,7 +138,7 @@ class ModelProfiler:
             if self.profiler is not None: self.profiler.start()
             device_interface.synchronize()
             for i in tqdm.trange(n_repeat, desc="Profiling TTFT..."):
-                self._shuffle_mask(model_inputs_kwargs['pruning_kwargs'], kwargs.get('sparsity', 0.0))
+                # self._shuffle_mask(model_inputs_kwargs['pruning_kwargs'], kwargs.get('sparsity', 0.0))
 
                 runtime.driver.active.clear_cache(device_cache)
                 device_interface.synchronize()
@@ -174,7 +175,7 @@ class ModelProfiler:
                 runtime.driver.active.clear_cache(device_cache)
 
                 for i in tqdm.trange(n_repeat, desc="Profiling TTFT with CUDA Graph..."):
-                    self._shuffle_mask(model_inputs_kwargs['pruning_kwargs'], kwargs.get('sparsity', 0.0))
+                    # self._shuffle_mask(model_inputs_kwargs['pruning_kwargs'], kwargs.get('sparsity', 0.0))
 
                     new_dummy_inputs = self._get_dummy_inputs(batch_size, seq_len)
                     self._inplace_copy(model_inputs_kwargs['input_ids'], new_dummy_inputs)
@@ -222,6 +223,7 @@ class ModelProfiler:
             use_cache=True,
             estimated_sparsity=kwargs.get('sparsity', 0.0),
             kv_cache_len=seq_len,
+            num_tokens=dummy_inputs.numel(),
         )
         device_interface = runtime.driver.active.get_device_interface()
         device_cache = runtime.driver.active.get_empty_cache_for_benchmark()
@@ -259,7 +261,7 @@ class ModelProfiler:
             if self.profiler is not None: self.profiler.start()
             device_interface.synchronize()
             for i in tqdm.trange(n_repeat, desc="Profiling TPOT..."):
-                self._shuffle_mask(model_inputs_kwargs['pruning_kwargs'], kwargs.get('sparsity', 0.0))
+                # self._shuffle_mask(model_inputs_kwargs['pruning_kwargs'], kwargs.get('sparsity', 0.0))
 
                 runtime.driver.active.clear_cache(device_cache)
                 device_interface.synchronize()
@@ -299,7 +301,7 @@ class ModelProfiler:
                 runtime.driver.active.clear_cache(device_cache)
 
                 for i in tqdm.trange(n_repeat, desc="Profiling TPOT with CUDA Graph..."):
-                    self._shuffle_mask(model_inputs_kwargs['pruning_kwargs'], kwargs.get('sparsity', 0.0))
+                    # self._shuffle_mask(model_inputs_kwargs['pruning_kwargs'], kwargs.get('sparsity', 0.0))
 
                     new_dummy_inputs = self._get_dummy_inputs(batch_size, 1)
                     self._inplace_copy(model_inputs_kwargs['input_ids'], new_dummy_inputs)

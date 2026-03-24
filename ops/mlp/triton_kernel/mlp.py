@@ -451,7 +451,8 @@ class BMSparseMLP:
                 if BLOCK_K > 32: BLOCK_K >>= 1
                 elif BLOCK_N > 64: BLOCK_N >>= 1
                 elif BLOCK_M > 32: BLOCK_M >>= 1
-                else: num_stages -= 1
+                elif num_stages > 2: num_stages -= 1
+                else: break
             
             # split-k active
             if triton.cdiv(M, BLOCK_M) * triton.cdiv(N, BLOCK_N) < num_sm:

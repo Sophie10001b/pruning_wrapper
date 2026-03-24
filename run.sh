@@ -8,11 +8,11 @@ style=dense
 config_name=dense
 
 benchmark_metric=ttft
-num_repeat=20
-sparsity=0.5
+num_repeat=10
 
 batch_size=(1)
 seq_len=(32768)
+sparsity=(0.5)
 
 if [[ $nsys_profile == 0 ]]; then
     python main.py \
@@ -24,14 +24,14 @@ if [[ $nsys_profile == 0 ]]; then
         --benchmark_metric $benchmark_metric \
         --num_warmup 1 \
         --num_repeat $num_repeat \
-        --sparsity $sparsity \
+        --sparsity ${sparsity[@]} \
         --batch_size ${batch_size[@]} \
         --seq_len ${seq_len[@]} \
         --liger_kernel \
         --cuda_graph
 
 else
-    nsys_prefix="${benchmark_metric}_${batch_size[0]}_${seq_len[0]}_${dynamic}_${style}_${config_name}_${sparsity}"
+    nsys_prefix="${benchmark_metric}_${batch_size[0]}_${seq_len[0]}_${dynamic}_${style}_${config_name}_${sparsity[0]}"
     nsys profile --trace=cuda,nvtx -o ${nsys_prefix}.nsys-rep --force-overwrite true python main.py \
         --model_name $model_name \
         --model_path $model_path \

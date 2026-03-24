@@ -8,11 +8,11 @@ layer:
   pruning_type: none
 
 self_attn:
-  estimated_sparsity: 0.5
+  estimated_sparsity: -1
   offset: 0
   pruning_type: M
 
 mlp:
-  estimated_sparsity: 0.5
+  estimated_sparsity: -1
   offset: 0
   pruning_type: M

@@ -4,5 +4,5 @@ prune_lm_head: false
 residual_mapping: false
 
 layer:
-  estimated_sparsity: 0.5
+  estimated_sparsity: -1
   pruning_type: M

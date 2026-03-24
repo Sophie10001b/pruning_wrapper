@@ -7,13 +7,14 @@ def record_results(res_dict: Dict[Tuple[int, int], List[float]], output_file: st
     df = pd.DataFrame(columns=[
         "Batch Size",
         "Seq Len",
+        "Sparsity",
         "Throughput (token/s)",
         "Max Throughput (token/s)",
         "Min Throughput (token/s)",
     ])
 
-    for (batch_size, seq_len), res in res_dict.items():
-        df.loc[len(df)] = [batch_size, seq_len, res[0], res[2], res[1]]
+    for (batch_size, seq_len, sparsity), res in res_dict.items():
+        df.loc[len(df)] = [batch_size, seq_len, sparsity, res[0], res[2], res[1]]
     
     res = df.to_string()
 

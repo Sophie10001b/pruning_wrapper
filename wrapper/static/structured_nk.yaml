@@ -13,12 +13,12 @@ self_attn:
   pruning_type: none
 
   q_proj:
-    estimated_sparsity: 0.5
+    estimated_sparsity: -1
     offset: 0
     pruning_type: N
   
   o_proj:
-    estimated_sparsity: 0.5
+    estimated_sparsity: -1
     offset: 0
     pruning_type: K
 
@@ -28,11 +28,11 @@ mlp:
   pruning_type: none
 
   up_proj:
-    estimated_sparsity: 0.5
+    estimated_sparsity: -1
     offset: 0
     pruning_type: N
   
   down_proj:
-    estimated_sparsity: 0.5
+    estimated_sparsity: -1
     offset: 0
     pruning_type: K

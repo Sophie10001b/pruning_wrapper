@@ -1,8 +1,8 @@
 cache_type: base
 
 attention:
-  estimated_sparsity: 0.5
+  estimated_sparsity: -1
   pruning_type: blasst
   backend: triton
   threshold: -1
-  enable_autotune: true
+  enable_autotune: false

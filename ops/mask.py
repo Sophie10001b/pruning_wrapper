@@ -81,13 +81,13 @@ class SparseSemiStructuredTensorCUSPARSELT(SparseSemiStructuredTensor):
 
     @classmethod
     def from_dense(
-        cls, original_tensor: torch.Tensor
+        cls, original_tensor: torch.Tensor, m_search_size: Optional[int]=1024
     ) -> "SparseSemiStructuredTensorCUSPARSELT":
         cls._validate_device_dim_dtype_shape(original_tensor)
 
         # search for best ALG_ID for spmm
         # from https://github.com/pytorch/pytorch/issues/153825
-        alg_id = search_for_alg_id(original_tensor.shape, device=original_tensor.device, dtype=original_tensor.dtype)
+        alg_id = search_for_alg_id(original_tensor.shape, device=original_tensor.device, dtype=original_tensor.dtype, m_size=max(m_search_size, 16))
         cls._ALG_CONFIG['alg_id'] = alg_id
 
         return cls(
@@ -291,4 +291,4 @@ class SemiStructuredMask:
             mask = cls.random_sample(module.weight.shape, device=module.weight.device, **kwargs)
         
         module.weight *= mask.to(module.weight.dtype)
-        module.weight = nn.Parameter(SparseSemiStructuredTensorCUSPARSELT.from_dense(module.weight))
+        module.weight = nn.Parameter(SparseSemiStructuredTensorCUSPARSELT.from_dense(module.weight, m_search_size=kwargs.get('num_tokens', 1024)))
