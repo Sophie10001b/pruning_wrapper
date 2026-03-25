@@ -154,7 +154,7 @@ def seer_decode_impl(
     end_k = tl.minimum(start_k + LBK, (batch_id + 1) * LK)
     key_length = end_k - start_k
 
-    mask_offset = (batch_id * HK + key_head_id) * query_block_num * key_block_num + query_id * key_block_num
+    mask_offset = (batch_id * HK + key_head_id) * query_block_num * key_block_num
 
     query_range_mask = tl.arange(0, BLOCK_M) < G
     query_data = tl.load(
@@ -165,7 +165,7 @@ def seer_decode_impl(
 
     split_n_range = tl.cdiv(key_length, BLOCK_N)
     for tile_n in tl.range(0, split_n_range):
-        is_execute = tl.load(execute_block + mask_offset + (tile_n * BLOCK_N + pad_offset_k) // BLOCK_N)
+        is_execute = tl.load(execute_block + mask_offset + (start_k + tile_n * BLOCK_N) // BLOCK_N)
         if is_execute:
             key_range_mask = ((tile_n * BLOCK_N + tl.arange(0, BLOCK_N)) < key_length)
             key_data = tl.load(

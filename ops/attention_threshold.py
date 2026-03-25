@@ -15,7 +15,7 @@ class BaseThreshold(nn.Module):
         raise NotImplementedError
     
     def get_threshold_kwargs(self):
-        return {}
+        return {'threshold': -1}
 
 
 class BlasstThreshold(BaseThreshold):
@@ -51,6 +51,3 @@ class SeerThreshold(BaseThreshold):
         block_num_q = (query_len + 64 - 1) // 64
         block_num_k = (kv_cache_len + 64 - 1) // 64
         return torch.rand((batch_size, num_key_heads, block_num_q, block_num_k), device=device) > sparsity
-    
-    def get_threshold_kwargs(self):
-        return {}

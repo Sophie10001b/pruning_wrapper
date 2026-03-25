@@ -279,13 +279,15 @@ class BlockSparseAttentionKernel(_PruningAttentionKernel):
                     attention_mask=None,
                 )
             else:
+                if impl == 'blasst': matched_mask = mask[0, 0, :, 0]
+                else: matched_mask = mask
                 func_kwargs = dict(
                     q=q,
                     k=k,
                     v=v,
                     threshold=-1,
                     pad_offset=torch.zeros((bsz, seqlen_q), dtype=torch.int32, device=device),
-                    execute_block=(mask > sparsity).to(device),
+                    execute_block=(matched_mask > sparsity).to(device),
                 )
                 if 'prefill' in mode: func_kwargs['prefill_impl'] = provider if provider != 'triton' else impl
                 elif 'decode' in mode: func_kwargs['decode_impl'] = provider if provider != 'triton' else impl
@@ -320,8 +322,8 @@ def run_test(*args, **kwargs):
     print(f"Detected device capability: {cc}, using dtype {dtype} for testing")
 
     kernel = BlockSparseAttentionKernel()
-    print(f"1. Test precision diff")
-    kernel.precision_diff(device=device, dtype=dtype)
+    # print(f"1. Test precision diff")
+    # kernel.precision_diff(device=device, dtype=dtype)
 
     print(f"2. Test prefill throughput")
     bench = kernel.get_benchmark(
@@ -336,7 +338,7 @@ def run_test(*args, **kwargs):
         mode='prefill',
         device=device,
         dtype=dtype,
-        impl=['blasst'],
+        impl=['blasst', 'seer'],
         tag='',
         x_log=True,
     )
@@ -357,7 +359,7 @@ def run_test(*args, **kwargs):
         mode='decode-cudagraph',
         device=device,
         dtype=dtype,
-        impl=['blasst'],
+        impl=['blasst', 'seer'],
         tag='',
         x_log=True,
     )

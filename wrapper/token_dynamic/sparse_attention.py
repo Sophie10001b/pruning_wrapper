@@ -269,7 +269,7 @@ class SparseAttentionForCausalLM(PrunedModelForCausalLM):
     ) -> Dict[str, torch.Tensor]:
         device = input_ids.device
         for layer in self.model.layers:
-            layer.generate_pruning_kwargs(kv_cache_len, device, **kwargs)
+            layer.generate_pruning_kwargs(kv_cache_len=kv_cache_len, device=device, **kwargs)
         
         return {}
     
