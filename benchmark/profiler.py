@@ -108,6 +108,8 @@ class ModelProfiler:
             past_key_values=None,
             estimated_sparsity=kwargs.get('sparsity', 0.0),
             use_cuda_graph=cuda_graph,
+            batch_size=batch_size,
+            query_len=seq_len,
             kv_cache_len=seq_len,
             num_tokens=dummy_inputs.numel(),
         )
@@ -222,6 +224,8 @@ class ModelProfiler:
             attention_mask=torch.ones_like(dummy_kv_cache, dtype=torch.bool),
             use_cache=True,
             estimated_sparsity=kwargs.get('sparsity', 0.0),
+            batch_size=batch_size,
+            query_len=1,
             kv_cache_len=seq_len,
             num_tokens=dummy_inputs.numel(),
         )

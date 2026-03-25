@@ -8,14 +8,14 @@ from .mask import BaseMask, UnstructuredMask, SemiStructuredMask
 
 from .index import BaseIndex, StructuredIndex
 
-from .attention_threshold import BaseThreshold, BlasstThreshold
+from .attention_threshold import BaseThreshold, BlasstThreshold, SeerThreshold
 
 from .attention.base import DenseAttentionKernel
 from .attention.query_pruning import QuerySparseAttentionKernel
 from .attention.query_head_group_pruning import GroupSparseAttentionKernel
 from .attention.query_head_pruning import HeadSparseAttentionKernel
 
-from .attention.pv_pruning import BlasstAttentionKernel
+from .attention.kv_pruning import BlockSparseAttentionKernel
 
 from .mlp.base import DenseMLPKernel
 from .mlp.bm_pruning import BMSparseMLPKernel
@@ -30,7 +30,7 @@ __all__ = [
     "QuerySparseAttentionKernel",
     "GroupSparseAttentionKernel",
     "HeadSparseAttentionKernel",
-    "BlasstAttentionKernel",
+    "BlockSparseAttentionKernel",
     "DenseMLPKernel",
     "BMSparseMLPKernel",
     "BNSparseMLPKernel",
@@ -64,6 +64,7 @@ __INDEX__ = {
 __THRESHOLD__ = {
     "base": BaseThreshold,
     "blasst": BlasstThreshold,
+    "seer": SeerThreshold,
 }
 
 __ATTENTION__ = {
@@ -75,7 +76,8 @@ __ATTENTION__ = {
 
 __SPARSE_ATTENTION__ = {
     "base": DenseAttentionKernel,
-    "blasst": BlasstAttentionKernel,
+    "blasst": BlockSparseAttentionKernel,
+    "seer": BlockSparseAttentionKernel,
 }
 
 __MLP__ = {

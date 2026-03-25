@@ -20,7 +20,7 @@ os.environ['TRITON_DEBUG']='0'
 
 STYLES = [('blue', '-'), ('red', '-'), ('green', '-'), ('orange', '-'), ('purple', '-'), ('brown', '-'), ('pink', '-'), ('gray', '-'), ('olive', '-'), ('cyan', '-')]
 
-class BlasstAttentionKernel(_PruningAttentionKernel):
+class BlockSparseAttentionKernel(_PruningAttentionKernel):
     """
     Kernel Implementation:
 
@@ -210,13 +210,13 @@ class BlasstAttentionKernel(_PruningAttentionKernel):
 
         if bench_name == 'seqlen':
             plot_name = f'query-sparse-attn-bsz{bsz}-sparsity{int(sparsity * 100)}-{mode}'
-            active_mask = torch.rand((bench_range[-1] // 16,), device='cpu')
+            active_mask = torch.rand((bsz, num_kv_heads, bench_range[-1] // 16, bench_range[-1] // 16), device='cpu')
         elif bench_name == 'bsz':
             plot_name = f'query-sparse-attn-seqlen{seqlen}-sparsity{int(sparsity * 100)}-{mode}'
-            active_mask = torch.rand((seqlen // 16,), device='cpu')
+            active_mask = torch.rand((bench_range[-1], num_kv_heads, seqlen // 16, seqlen // 16), device='cpu')
         elif bench_name == 'sparsity':
             plot_name = f'query-sparse-attn-bsz{bsz}-seqlen{seqlen}-{mode}'
-            active_mask = torch.rand((seqlen // 16,), device='cpu')
+            active_mask = torch.rand((bsz, num_kv_heads, seqlen // 16, seqlen // 16), device='cpu')
         else:
             raise ValueError(f'Unknown bench_name: {bench_name}')
         
@@ -319,7 +319,7 @@ def run_test(*args, **kwargs):
 
     print(f"Detected device capability: {cc}, using dtype {dtype} for testing")
 
-    kernel = BlasstAttentionKernel()
+    kernel = BlockSparseAttentionKernel()
     print(f"1. Test precision diff")
     kernel.precision_diff(device=device, dtype=dtype)
 

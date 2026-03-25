@@ -117,12 +117,17 @@ class SparseAttentionDecoderLayer(PrunedDecoderLayer):
     
     def generate_pruning_kwargs(
         self,
+        batch_size: int,
+        query_len: int,
         kv_cache_len: int,
         device: Optional[torch.device]='cuda:0',
         **kwargs,
     ) -> Dict[str, torch.Tensor]:
         mask = self.self_attn.threshold_impl.generate_mask(
+            batch_size=batch_size,
+            query_len=query_len,
             kv_cache_len=kv_cache_len,
+            num_key_heads=self.config.num_key_value_heads,
             sparsity=self.self_attn.attention_kwargs.get('estimated_sparsity', 0),
             device=device,
         )

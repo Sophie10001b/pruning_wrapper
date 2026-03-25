@@ -34,3 +34,23 @@ class BlasstThreshold(BaseThreshold):
     
     def get_threshold_kwargs(self):
         return {'threshold': self.threshold}
+
+class SeerThreshold(BaseThreshold):
+    def __init__(self, **kwargs):
+        super().__init__()
+    
+    def generate_mask(
+        self,
+        batch_size: int,
+        query_len: int,
+        kv_cache_len: int,
+        num_key_heads: int,
+        sparsity: Optional[float]=0,
+        device: Optional[torch.device]='cuda:0',
+    ):
+        block_num_q = (query_len + 64 - 1) // 64
+        block_num_k = (kv_cache_len + 64 - 1) // 64
+        return torch.rand((batch_size, num_key_heads, block_num_q, block_num_k), device=device) > sparsity
+    
+    def get_threshold_kwargs(self):
+        return {}
