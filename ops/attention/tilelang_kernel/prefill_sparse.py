@@ -180,7 +180,6 @@ class SparseAttentionTilelangPrefill:
         
         block_size = kwargs.pop('block_size', -1)
         if block_size > 0:
-            if impl in ['seer']: BLOCK_M = block_size
             BLOCK_N = block_size
 
         if impl not in cls.support_kernel:

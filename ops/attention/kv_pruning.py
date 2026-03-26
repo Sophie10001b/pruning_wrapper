@@ -14,11 +14,24 @@ from .base import _PruningAttentionKernel, DenseAttentionKernel
 from .triton_kernel.prefill_sparse import SparseAttentionPrefill
 from .triton_kernel.decode_sparse import SparseAttentionDecode
 
+from .tilelang_kernel.prefill_sparse import SparseAttentionTilelangPrefill
+
 os.environ['TRITON_PRINT_AUTOTUNING']='0'
 os.environ['CUDA_LAUNCH_BLOCKING']='0'
 os.environ['TRITON_DEBUG']='0'
 
 STYLES = [('blue', '-'), ('red', '-'), ('green', '-'), ('orange', '-'), ('purple', '-'), ('brown', '-'), ('pink', '-'), ('gray', '-'), ('olive', '-'), ('cyan', '-')]
+
+def backend_dispatch(backend: str):
+    if backend == 'tilelang':
+        return dict(
+            prefill=SparseAttentionTilelangPrefill,
+        )
+    else:
+        return dict(
+            prefill=SparseAttentionPrefill,
+            decode=SparseAttentionDecode,
+        )
 
 class BlockSparseAttentionKernel(_PruningAttentionKernel):
     """
@@ -56,7 +69,7 @@ class BlockSparseAttentionKernel(_PruningAttentionKernel):
             execute_block: torch.Tensor with shape [cdiv(key_length, 16)], manually specified execute block
             out: torch.Tensor with shape same as q or kwargs.flatten_q
         """
-        return SparseAttentionPrefill.kernel(
+        return backend_dispatch(backend=kwargs.get('backend', 'triton'))['prefill'].kernel(
             q=q,
             k=k,
             v=v,
@@ -94,7 +107,7 @@ class BlockSparseAttentionKernel(_PruningAttentionKernel):
             execute_block: torch.Tensor with shape [cdiv(key_length, 16)], manually specified execute block
             out: torch.Tensor with shape [batch_size, 1, num_heads, head_dim]
         """
-        return SparseAttentionDecode.kernel(
+        return backend_dispatch(backend=kwargs.get('backend', 'triton'))['decode'].kernel(
             q=q,
             k=k,
             v=v,
@@ -291,6 +304,10 @@ class BlockSparseAttentionKernel(_PruningAttentionKernel):
                 )
                 if 'prefill' in mode: func_kwargs['prefill_impl'] = provider if provider != 'triton' else impl
                 elif 'decode' in mode: func_kwargs['decode_impl'] = provider if provider != 'triton' else impl
+
+                if '.' in provider: backend = provider.split('.')[-1]
+                else: backend = 'triton'
+                func_kwargs['backend'] = backend
 
                 func = partial(
                     self.forward,
