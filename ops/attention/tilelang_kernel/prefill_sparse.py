@@ -14,6 +14,7 @@ def seer_prefill_impl(
     mQ, mK, mV, mO,
     mPad, mBSMask,
     BM: int, BN: int,
+    sm_scale: float,
     dtype: T.DType=T.float16,
     accum_dtype: T.DType=T.float32,
     num_stages: int=2,
@@ -28,9 +29,9 @@ def seer_prefill_impl(
     mV: T.Tensor[[B, Tk, Hk, C], dtype]
     mO: T.Tensor[[B, Tq, Hq, C], dtype]
     mPad: T.Tensor[[B], T.int32]
-    mBSMask: T.Tensor[[B, Hk, BTq, BTk], T.int8]
+    mBSMask: T.Tensor[[B, Hk, T.ceildiv(Tq, 16), T.ceildiv(Tk, 16)], T.int8]
 
-    qk_scale = (C ** -0.5) * 1.44269504
+    qk_scale = sm_scale * 1.44269504
     G = Hq // Hk
 
     with T.Kernel(B, Hq, BTq, threads=128) as (bidx, bidy, bidz):
@@ -48,41 +49,42 @@ def seer_prefill_impl(
         rLogsum = T.alloc_fragment([BM], accum_dtype)
         rAcc = T.alloc_fragment([BM, C], accum_dtype)
         rAcc_tmp = T.alloc_fragment([BM, BN], accum_dtype)
-        rP =  T.alloc_fragment([BM, C], dtype)
+        rP =  T.alloc_fragment([BM, BN], dtype)
 
         T.fill(rMax, -T.infinity(accum_dtype))
         T.fill(rLogsum, 0.0)
         T.fill(rAcc, 0.0)
 
         T.copy(mPad[bidx], rPad)
-        T.copy(mQ[bidx, bidz * BM:(bidz + 1) * BM, bidy, :], sQ)
+        T.copy(mQ[bidx, bidz * BM:(bidz + 1) * BM, bidy, :], sQ, disable_tma=True)
 
         iter_num = T.ceildiv((bidz + 1) * BM - rPad[0] + 1, BN)
         for iter in T.Pipelined(iter_num, num_stages=num_stages):
             T.copy(mBSMask[bidx, bidy // G, bidz, iter], rBSMask)
             if rBSMask[0] != 0:
-                T.copy(mK[bidx, iter * BN + rPad[0]:(iter + 1) * BN + rPad[0], bidy // G, :], sK)
+                T.copy(mK[bidx, iter * BN + rPad[0]:(iter + 1) * BN + rPad[0], bidy // G, :], sK, disable_tma=True)
                 T.gemm(sQ, sK, rAcc_tmp, transpose_B=True, policy=T.GemmWarpPolicy.FullRow, clear_accum=True)
                 for i, j in T.Parallel(BM, BN):
                     rAcc_tmp[i, j] = T.if_then_else(
-                        (bidz * BM + i < Hq) & (iter * BN + j + rPad[0] < Hk) & (bidz * BM + i >= iter * BN + j + rPad[0]),
+                        (bidz * BM + i < Tq) & (iter * BN + j + rPad[0] < Tk) & (bidz * BM + i >= iter * BN + j + rPad[0]),
                         rAcc_tmp[i, j] * qk_scale,
                         -T.infinity(accum_dtype)
                     )
                 
-                T.reduce_max(rAcc_tmp, rMax)
+                T.reduce_max(rAcc_tmp, rMax_tmp)
                 for i in T.Parallel(BM):
                     rMax_tmp[i] = T.max(rMax_tmp[i], rMax[i])
-                    rScale[i] = T.exp2(rMax_tmp[i] - rMax[i])
+                    rScale[i] = T.exp2(rMax[i] - rMax_tmp[i])
                 for i, j in T.Parallel(BM, BN):
                     rAcc_tmp[i, j] = T.exp2(rAcc_tmp[i, j] - rMax_tmp[i])
-                    rAcc[i, j] *= rScale[i]
                 T.reduce_sum(rAcc_tmp, rSum)
                 for i in T.Parallel(BM):
                     rLogsum[i] = rLogsum[i] * rScale[i] + rSum[i]
+                for i, j in T.Parallel(BM, C):
+                    rAcc[i, j] *= rScale[i]
                 
                 T.copy(rAcc_tmp, rP)
-                T.copy(mV[bidx, iter * BN + rPad[0]:(iter + 1) * BN + rPad[0], bidy // G, :], sV)
+                T.copy(mV[bidx, iter * BN + rPad[0]:(iter + 1) * BN + rPad[0], bidy // G, :], sV, disable_tma=True)
                 T.gemm(rP, sV, rAcc, policy=T.GemmWarpPolicy.FullRow, clear_accum=False)
 
                 T.copy(rMax_tmp, rMax)
@@ -90,7 +92,7 @@ def seer_prefill_impl(
         for i, j in T.Parallel(BM, C):
             rAcc[i, j] /= rLogsum[i]
         
-        T.copy(rAcc, mO[bidx, bidz * BM:(bidz + 1) * BM, bidy, :])
+        T.copy(rAcc, mO[bidx, bidz * BM:(bidz + 1) * BM, bidy, :], disable_tma=True)
 
 
 class SparseAttentionTilelangPrefill:
@@ -127,8 +129,8 @@ class SparseAttentionTilelangPrefill:
 
         out = torch.empty_like(q)
         seer_prefill_impl(
-            q, k, v, out, pad_offset, execute_block,
-            BLOCK_M, BLOCK_N, dtype=getattr(T, str(q.dtype).split('.')[-1])
+            q, k, v, out, pad_offset.to(torch.int32), execute_block.to(torch.int8),
+            BLOCK_M, BLOCK_N, D ** -0.5, dtype=getattr(T, str(q.dtype).split('.')[-1])
         )
         return out
     
@@ -169,6 +171,10 @@ class SparseAttentionTilelangPrefill:
         BLOCK_M = kwargs.pop('BLOCK_M', BLOCK_M)
         BLOCK_N = kwargs.pop('BLOCK_N', BLOCK_N)
 
+        block_size = kwargs.pop('block_size', -1)
+        if block_size > 0:
+            BLOCK_N = block_size
+
         while not check_shared_memory_attn(BLOCK_M, BLOCK_N, D, num_stages, dtype.itemsize):
             if BLOCK_M > 32: BLOCK_M >>= 1
             elif num_stages > 2: num_stages -= 1
@@ -178,10 +184,6 @@ class SparseAttentionTilelangPrefill:
             if BLOCK_M > 16: BLOCK_M >>= 1
             else: break
         
-        block_size = kwargs.pop('block_size', -1)
-        if block_size > 0:
-            BLOCK_N = block_size
-
         if impl not in cls.support_kernel:
             raise ValueError(f"{impl} is not supported")
         

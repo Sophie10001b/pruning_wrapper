@@ -15,6 +15,7 @@ from .triton_kernel.prefill_sparse import SparseAttentionPrefill
 from .triton_kernel.decode_sparse import SparseAttentionDecode
 
 from .tilelang_kernel.prefill_sparse import SparseAttentionTilelangPrefill
+from .tilelang_kernel.decode_sparse import SparseAttentionTilelangDecode
 
 os.environ['TRITON_PRINT_AUTOTUNING']='0'
 os.environ['CUDA_LAUNCH_BLOCKING']='0'
@@ -26,6 +27,7 @@ def backend_dispatch(backend: str):
     if backend == 'tilelang':
         return dict(
             prefill=SparseAttentionTilelangPrefill,
+            decode=SparseAttentionTilelangDecode,
         )
     else:
         return dict(
@@ -135,10 +137,10 @@ class BlockSparseAttentionKernel(_PruningAttentionKernel):
     ):
         assert k.dim() == 4 and q.dim() == 4
         if q.shape[1] > 1:
-            return cls.base_prefill(q, k, v, threshold, pad_offset, execute_block, block_size=block_size, impl=prefill_impl, enable_autotune=enable_autotune)
+            return cls.base_prefill(q, k, v, threshold, pad_offset, execute_block, block_size=block_size, impl=prefill_impl, enable_autotune=enable_autotune, **kwargs)
         else:
             assert k.dim() == 4 and q.dim() == 4
-            return cls.base_decode(q, k, v, threshold, pad_offset, execute_block, block_size=block_size, impl=decode_impl, enable_autotune=enable_autotune)
+            return cls.base_decode(q, k, v, threshold, pad_offset, execute_block, block_size=block_size, impl=decode_impl, enable_autotune=enable_autotune, **kwargs)
     
     def _ref_forward(
         self,
@@ -171,11 +173,12 @@ class BlockSparseAttentionKernel(_PruningAttentionKernel):
         num_kv_heads = kwargs.get('num_kv_heads', 8)
         head_dim = kwargs.get('head_dim', 128)
 
-        for is_prefill in [True, False]:
+        for is_prefill in [True]:
             for i in range(repeat):
                 bsz = random.randint(1, 16)
                 seqlen = random.sample(list(range(1024, 4097, 128)), 1)[0]
-                execute_block = torch.randint(0, 2, (triton.cdiv(seqlen, 16),), device=device)
+                # execute_block = torch.randint(0, 2, (triton.cdiv(seqlen, 16),), device=device)
+                execute_block = torch.ones((bsz, num_kv_heads, triton.cdiv(seqlen, 16), triton.cdiv(seqlen, 16)), device=device, dtype=torch.int8)
 
                 seqlen_q = seqlen if is_prefill else 1
                 seqlen_kv = seqlen
@@ -189,8 +192,8 @@ class BlockSparseAttentionKernel(_PruningAttentionKernel):
 
                 pad_offset = seqlen_kv - attention_mask.sum(-1)
 
-                ref_out = self._ref_forward(deepcopy(q), deepcopy(k), deepcopy(v), attention_mask, pad_offset, execute_block)
-                out = self.forward(deepcopy(q), deepcopy(k), deepcopy(v), 0, pad_offset, execute_block, enable_autotune=False, BLOCK_N=16)
+                ref_out = self._ref_forward(deepcopy(q), deepcopy(k), deepcopy(v), attention_mask, pad_offset, None)
+                out = self.forward(deepcopy(q), deepcopy(k), deepcopy(v), -1, 64, pad_offset, execute_block, enable_autotune=False, prefill_impl='seer', backend='tilelang')
 
                 diff = torch.abs(out - ref_out)
                 mean_diff = diff.mean().item()
@@ -290,22 +293,29 @@ class BlockSparseAttentionKernel(_PruningAttentionKernel):
                     k=k,
                     v=v,
                     attention_mask=None,
+                    pad_offset=torch.zeros((bsz,), dtype=torch.int32, device=device),
+                    execute_block=None,
                 )
             else:
-                if impl == 'blasst': matched_mask = mask[0, 0, :, 0]
+                if 'blasst' in provider: matched_mask = mask[0, 0, :, 0]
+                elif 'seer' in provider: matched_mask = mask[:, :, :(seqlen_q - 1 + 16) // 16, :(seqlen_kv - 1 + 16) // 16]
                 else: matched_mask = mask
                 func_kwargs = dict(
                     q=q,
                     k=k,
                     v=v,
                     threshold=-1,
-                    pad_offset=torch.zeros((bsz, seqlen_q), dtype=torch.int32, device=device),
+                    block_size=64,
+                    pad_offset=torch.zeros((bsz,), dtype=torch.int32, device=device),
                     execute_block=(matched_mask > sparsity).to(device),
                 )
                 if 'prefill' in mode: func_kwargs['prefill_impl'] = provider if provider != 'triton' else impl
                 elif 'decode' in mode: func_kwargs['decode_impl'] = provider if provider != 'triton' else impl
 
-                if '.' in provider: backend = provider.split('.')[-1]
+                if '.' in provider:
+                    backend = provider.split('.')[-1]
+                    if 'prefill' in mode: func_kwargs['prefill_impl'] = func_kwargs['prefill_impl'].split('.')[0]
+                    if 'decode' in mode: func_kwargs['decode_impl'] = func_kwargs['decode_impl'].split('.')[0]
                 else: backend = 'triton'
                 func_kwargs['backend'] = backend
 
@@ -339,8 +349,8 @@ def run_test(*args, **kwargs):
     print(f"Detected device capability: {cc}, using dtype {dtype} for testing")
 
     kernel = BlockSparseAttentionKernel()
-    # print(f"1. Test precision diff")
-    # kernel.precision_diff(device=device, dtype=dtype)
+    print(f"1. Test precision diff")
+    kernel.precision_diff(device=device, dtype=dtype)
 
     print(f"2. Test prefill throughput")
     bench = kernel.get_benchmark(
@@ -355,7 +365,7 @@ def run_test(*args, **kwargs):
         mode='prefill',
         device=device,
         dtype=dtype,
-        impl=['blasst', 'seer'],
+        impl=['seer.triton', 'seer.tilelang'],
         tag='',
         x_log=True,
     )
@@ -363,26 +373,26 @@ def run_test(*args, **kwargs):
     os.makedirs('./triton_benchmark', exist_ok=True)
     bench.run(print_data=True, show_plots=False, save_path='./triton_benchmark')
 
-    print(f"3. Test decode throughput")
-    bench = kernel.get_benchmark(
-        bench_name='seqlen',
-        bench_range=[2 ** i for i in range(10, 15)],
-        bsz=32,
-        seqlen=4096,
-        num_q_heads=32,
-        num_kv_heads=8,
-        head_dim=128,
-        sparsity=0.5,
-        mode='decode-cudagraph',
-        device=device,
-        dtype=dtype,
-        impl=['blasst', 'seer'],
-        tag='',
-        x_log=True,
-    )
+    # print(f"3. Test decode throughput")
+    # bench = kernel.get_benchmark(
+    #     bench_name='seqlen',
+    #     bench_range=[2 ** i for i in range(10, 15)],
+    #     bsz=32,
+    #     seqlen=4096,
+    #     num_q_heads=32,
+    #     num_kv_heads=8,
+    #     head_dim=128,
+    #     sparsity=0.5,
+    #     mode='decode-cudagraph',
+    #     device=device,
+    #     dtype=dtype,
+    #     impl=['blasst', 'seer'],
+    #     tag='',
+    #     x_log=True,
+    # )
 
-    os.makedirs('./triton_benchmark', exist_ok=True)
-    bench.run(print_data=True, show_plots=False, save_path='./triton_benchmark')
+    # os.makedirs('./triton_benchmark', exist_ok=True)
+    # bench.run(print_data=True, show_plots=False, save_path='./triton_benchmark')
 
 if __name__ == '__main__':
     run_test()

@@ -214,8 +214,6 @@ def seer_decode_impl(
             mask=query_range_mask,
         )
 
-
-
 def merge_impl(
     out_tmp: tl.tensor, # [B, 1, HQ, splitk, D]
     metadata: tl.tensor, # [B, 1, HQ, 2, splitk] for local max and local sum
@@ -366,10 +364,10 @@ class SparseAttentionDecode:
         G = HQ // HK
 
         # compute qk score
-        q_block = rearrange(q, 'b k (h g) d -> b h g k d', g=G).contiguous().mean(2)
-        k_block = rearrange(k, 'b (nk k) h d -> b h nk k d', k=BLOCK_N).contiguous().mean(-2) # [b h lk // BLOCK_N, d]
-        qk_score = q_block.permute(0, 2, 1, 3) @ (k_block.permute(0, 2, 3, 1)) # [B, HK, LQ', LK']
-        qk_score = torch.softmax(qk_score * D**-0.5, dim=-1)
+        # q_block = rearrange(q, 'b k (h g) d -> b h g k d', g=G).contiguous().mean(2)
+        # k_block = rearrange(k, 'b (nk k) h d -> b h nk k d', k=BLOCK_N).contiguous().mean(-2) # [b h lk // BLOCK_N, d]
+        # qk_score = q_block.permute(0, 2, 1, 3) @ (k_block.permute(0, 2, 3, 1)) # [B, HK, LQ', LK']
+        # qk_score = torch.softmax(qk_score * D**-0.5, dim=-1)
 
         out = torch.empty_like(q)
         grid = lambda meta: (num_split, HK, B)
@@ -461,7 +459,11 @@ class SparseAttentionDecode:
         BLOCK_N = kwargs.pop('BLOCK_N', BLOCK_N)
         BLOCK_N = kwargs.pop('block_size', BLOCK_N)
 
-        num_stages = 3
+        block_size = kwargs.pop('block_size', -1)
+        if block_size > 0:
+            BLOCK_N = block_size
+
+        num_stages = 2
         num_warps = 4
 
         num_split = 1

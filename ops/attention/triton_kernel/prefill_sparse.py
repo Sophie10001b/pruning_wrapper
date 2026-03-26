@@ -330,6 +330,10 @@ class SparseAttentionPrefill:
         BLOCK_M = kwargs.pop('BLOCK_M', BLOCK_M)
         BLOCK_N = kwargs.pop('BLOCK_N', BLOCK_N)
 
+        block_size = kwargs.pop('block_size', -1)
+        if block_size > 0:
+            BLOCK_N = block_size
+
         while not check_shared_memory_attn(BLOCK_M, BLOCK_N, D, num_stages, dtype.itemsize):
             if BLOCK_M > 32: BLOCK_M >>= 1
             elif num_stages > 2: num_stages -= 1
@@ -339,10 +343,6 @@ class SparseAttentionPrefill:
             if BLOCK_M > 16: BLOCK_M >>= 1
             else: break
         
-        block_size = kwargs.pop('block_size', -1)
-        if block_size > 0:
-            BLOCK_N = block_size
-
         if impl not in cls.support_kernel:
             raise ValueError(f"{impl} is not supported")
         
