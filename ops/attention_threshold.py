@@ -48,6 +48,6 @@ class SeerThreshold(BaseThreshold):
         sparsity: Optional[float]=0,
         device: Optional[torch.device]='cuda:0',
     ):
-        block_num_q = (query_len + 64 - 1) // 64
-        block_num_k = (kv_cache_len + 64 - 1) // 64
+        block_num_q = (query_len + 16 - 1) // 16
+        block_num_k = (kv_cache_len + 16 - 1) // 16
         return torch.rand((batch_size, num_key_heads, block_num_q, block_num_k), device=device) > sparsity

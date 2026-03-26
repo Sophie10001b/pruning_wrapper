@@ -11,8 +11,8 @@ from einops import rearrange
 from triton.testing import do_bench, do_bench_cudagraph
 
 from .base import _PruningAttentionKernel, DenseAttentionKernel
-from .triton_kernel.prefill_sparse import PVSparsePrefill
-from .triton_kernel.decode_sparse import PVSparseDecode
+from .triton_kernel.prefill_sparse import SparseAttentionPrefill
+from .triton_kernel.decode_sparse import SparseAttentionDecode
 
 os.environ['TRITON_PRINT_AUTOTUNING']='0'
 os.environ['CUDA_LAUNCH_BLOCKING']='0'
@@ -56,7 +56,7 @@ class BlockSparseAttentionKernel(_PruningAttentionKernel):
             execute_block: torch.Tensor with shape [cdiv(key_length, 16)], manually specified execute block
             out: torch.Tensor with shape same as q or kwargs.flatten_q
         """
-        return PVSparsePrefill.kernel(
+        return SparseAttentionPrefill.kernel(
             q=q,
             k=k,
             v=v,
@@ -94,7 +94,7 @@ class BlockSparseAttentionKernel(_PruningAttentionKernel):
             execute_block: torch.Tensor with shape [cdiv(key_length, 16)], manually specified execute block
             out: torch.Tensor with shape [batch_size, 1, num_heads, head_dim]
         """
-        return PVSparseDecode.kernel(
+        return SparseAttentionDecode.kernel(
             q=q,
             k=k,
             v=v,

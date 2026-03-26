@@ -193,7 +193,7 @@ def seer_prefill_impl(
     )
     
 
-class PVSparsePrefill:
+class SparseAttentionPrefill:
 
     support_kernel = [
         'blasst',
@@ -327,8 +327,8 @@ class PVSparsePrefill:
         BLOCK_M = triton.next_power_of_2(LQ)
         BLOCK_M = min(128, max(16, BLOCK_M))
         BLOCK_N = min(64, max(16, triton.next_power_of_2(LQ)))
+        BLOCK_M = kwargs.pop('BLOCK_M', BLOCK_M)
         BLOCK_N = kwargs.pop('BLOCK_N', BLOCK_N)
-        BLOCK_N = kwargs.pop('block_size', BLOCK_N)
 
         while not check_shared_memory_attn(BLOCK_M, BLOCK_N, D, num_stages, dtype.itemsize):
             if BLOCK_M > 32: BLOCK_M >>= 1
@@ -339,7 +339,10 @@ class PVSparsePrefill:
             if BLOCK_M > 16: BLOCK_M >>= 1
             else: break
         
-        BLOCK_M = kwargs.pop('BLOCK_M', BLOCK_M)
+        block_size = kwargs.pop('block_size', -1)
+        if block_size > 0:
+            if impl in ['seer']: BLOCK_M = block_size
+            BLOCK_N = block_size
 
         if impl not in cls.support_kernel:
             raise ValueError(f"{impl} is not supported")

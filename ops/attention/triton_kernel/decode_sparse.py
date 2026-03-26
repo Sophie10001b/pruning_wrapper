@@ -259,7 +259,7 @@ def merge_impl(
     )
     
 
-class PVSparseDecode:
+class SparseAttentionDecode:
 
     support_kernel = [
         'blasst',
