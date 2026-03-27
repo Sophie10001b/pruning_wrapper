@@ -1,11 +1,7 @@
 print_autotune=1
 nsys_profile=0
 model_name=llama3.1-8b
-model_path=/home/hk-project-p0022189/tum_yvc3016/anhao/haozhe/modelscope_cache/models/LLM-Research/Meta-Llama-3.1-8B
-
-dynamic=static
-style=dense
-config_name=dense
+model_path=...
 
 benchmark_metric=ttft
 num_repeat=10
@@ -13,6 +9,10 @@ num_repeat=10
 batch_size=(1)
 seq_len=(32768)
 sparsity=(0.5)
+
+dynamic=static
+style=dense
+config_name=dense
 
 if [[ $nsys_profile == 0 ]]; then
     python main.py \
