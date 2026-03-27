@@ -46,11 +46,6 @@ def bm_sort_mlp_impl(
         rBSIndex = T.alloc_fragment([BM], T.int32)
 
         T.clear(rD)
-
-        T.annotate_layout({
-            sA: make_swizzle_layout(sA),
-            sB: make_swizzle_layout(sB),
-        })
         T.use_swizzle(panel_size=10)
 
         m_base = bidx * BM
@@ -63,12 +58,12 @@ def bm_sort_mlp_impl(
 
         if rSkip[0] != 0:
             for i in T.Parallel(BM):
-                rBSIndex[i] = T.if_then_else(m_base + i < M, mBSIndex[m_base + i], i)
+                rBSIndex[i] = T.if_then_else(m_base + i < M, mBSIndex[m_base + i], 0)
         
             for iter in T.Pipelined(T.ceildiv(split_size, BK), num_stages=num_stages):
-                for i in T.Parallel(BM):
-                    sA[i, :] = mA[rBSIndex[i], k_base + iter * BK * SplitK:k_base + (iter + 1) * BK * SplitK]
-                T.copy(mB[n_base:n_base + BN, k_base + iter * BK * SplitK:k_base + (iter + 1) * BK * SplitK], sB)
+                for i, j in T.Parallel(BM, BK):
+                    sA[i, j] = T.if_then_else(k_base + iter * BK * SplitK + j < K, mA[rBSIndex[i], k_base + iter * BK * SplitK + j], 0)
+                T.copy(mB[n_base, k_base + iter * BK * SplitK], sB)
 
                 T.gemm(sA, sB, rD, transpose_B=True, policy=T.GemmWarpPolicy.FullRow, clear_accum=False)
 
@@ -80,11 +75,11 @@ def bm_sort_mlp_impl(
                     for i, j in T.Parallel(BM, BN):
                         rD[i, j] = T.max(rD[i, j], 0)
                 
-                for i in T.Parallel(BM):
-                    if rBSMask[i] != 0: mD[rBSIndex[i], n_base:n_base + BN] = rD[i, :]
+                for i, j in T.Parallel(BM, BN):
+                    if rBSMask[i] != 0: mD[rBSIndex[i], n_base + j] = rD[i, j]
             else:
-                for i in T.Parallel(BM):
-                    if rBSMask[i] != 0: T.atomic_add(mD[rBSIndex[i], n_base:n_base + BN], rD[i, :], memory_order='relaxed')
+                for i, j in T.Parallel(BM, BN):
+                    if rBSMask[i] != 0: T.atomic_add(mD[rBSIndex[i], n_base + j], rD[i, j], memory_order='relaxed')
 
 
 #########################
@@ -166,7 +161,7 @@ class BMSparseTilelangMLP:
         
         out = torch.zeros((M, N), dtype=x.dtype, device=x.device)
         bm_sort_mlp_impl(
-            x_flat, w, out, m_sort, m_sort_indices, BLOCK_M, BLOCK_N, BLOCK_K, SPLIT_K,
+            x_flat, w, out, m_sort.to(torch.int8), m_sort_indices.to(torch.int32), BLOCK_M, BLOCK_N, BLOCK_K, SPLIT_K,
             activation=kwargs.get('activation', 'identity'),
             dtype=getattr(T, str(x.dtype).split('.')[-1]),
             num_stages=num_stages

@@ -225,7 +225,7 @@ class ModelProfiler:
             use_cache=True,
             estimated_sparsity=kwargs.get('sparsity', 0.0),
             batch_size=batch_size,
-            query_len=1,
+            query_len=seq_len,
             kv_cache_len=seq_len,
             num_tokens=dummy_inputs.numel(),
         )
@@ -239,6 +239,9 @@ class ModelProfiler:
         model_outputs: CausalLMOutputWithPast = self.model(**model_inputs_kwargs)
         model_inputs_kwargs['past_key_values'] = model_outputs.past_key_values
         model_inputs_kwargs['input_ids'] = dummy_inputs
+        model_inputs_kwargs['query_len'] = 1
+        model_inputs_kwargs['kv_cache_len'] = seq_len
+        model_inputs_kwargs['past_key_values'].fallback_cache(seq_len - 1)
 
         # 1. warmup
         print("[INFO] Warmup the model...")
@@ -246,7 +249,7 @@ class ModelProfiler:
             dummy_pruning_kwargs = self.model.generate_pruning_kwargs(**model_inputs_kwargs)
             model_inputs_kwargs['pruning_kwargs'] = dummy_pruning_kwargs
             self.model(**model_inputs_kwargs)
-            model_inputs_kwargs['past_key_values'].fallback_cache(seq_len)
+            model_inputs_kwargs['past_key_values'].fallback_cache(seq_len - 1)
 
         device_interface.synchronize()
 
@@ -275,7 +278,7 @@ class ModelProfiler:
                 if self.profiler is not None: self.profiler.step()
                 end_events[i].record()
                 device_interface.synchronize()
-                model_inputs_kwargs['past_key_values'].fallback_cache(seq_len)
+                model_inputs_kwargs['past_key_values'].fallback_cache(seq_len - 1)
             
             device_interface.synchronize()
             if self.profiler is not None: self.profiler.stop()
@@ -317,7 +320,7 @@ class ModelProfiler:
                     if self.profiler is not None: self.profiler.step()
                     end_events[i].record()
                     device_interface.synchronize()
-                    model_inputs_kwargs['past_key_values'].fallback_cache(seq_len)
+                    model_inputs_kwargs['past_key_values'].fallback_cache(seq_len - 1)
                 
                 device_interface.synchronize()
                 if self.profiler is not None: self.profiler.stop()

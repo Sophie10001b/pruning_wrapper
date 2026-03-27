@@ -74,8 +74,8 @@ class DynamicLayerSeqFirst(CacheLayerMixin):
         if self.get_seq_length() <= max_length:
             return
 
-        self.keys = self.keys[..., :max_length, :]
-        self.values = self.values[..., :max_length, :]
+        self.keys = self.keys[:, :max_length]
+        self.values = self.values[:, :max_length]
 
     def batch_repeat_interleave(self, repeats: int) -> None:
         """Repeat the cache `repeats` times in the batch dimension."""

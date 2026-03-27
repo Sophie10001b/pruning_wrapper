@@ -82,6 +82,9 @@ class SparseAttention(PrunedAttention):
             attention_mask=attention_mask,
             pad_offset=pad_offset,
             execute_block=getattr(self, 'execute_block', None),
+            prefill_impl=self.attention_kwargs.get('pruning_type'),
+            decode_impl=self.attention_kwargs.get('pruning_type'),
+            backend=self.attention_kwargs.get('backend', 'triton'),
         )
         input_kwargs.update(self.threshold_impl.get_threshold_kwargs())
 
