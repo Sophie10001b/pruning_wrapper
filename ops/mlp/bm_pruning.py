@@ -15,13 +15,19 @@ from .triton_kernel.mlp import BMSparseMLP
 from .triton_kernel.glu import BMSparseGLU
 from .triton_kernel.ffn import BMSparseFFN
 
-# from .gluon_kernel.mlp import BMSparseMLP
+from .tilelang_kernel.mlp import BMSparseTilelangMLP
 
 os.environ['TRITON_PRINT_AUTOTUNING']='0'
 os.environ['CUDA_LAUNCH_BLOCKING']='0'
 os.environ['TRITON_DEBUG']='0'
 
 STYLES = [('blue', '-'), ('red', '-'), ('green', '-'), ('orange', '-'), ('purple', '-'), ('brown', '-'), ('pink', '-'), ('gray', '-'), ('olive', '-'), ('cyan', '-')]
+
+def backend_dispatch(backend: str):
+    if backend == 'tilelang':
+        return BMSparseTilelangMLP
+    else:
+        return BMSparseMLP
 
 class BMSparseMLPKernel(_PruningMLPKernel):
     """
@@ -62,7 +68,7 @@ class BMSparseMLPKernel(_PruningMLPKernel):
         """
 
         if (w_down is None) and (w_gate is None): # single mlp layer
-            res, meta = BMSparseMLP.kernel(
+            res, meta = backend_dispatch(backend=kwargs.get('backend', 'triton')).kernel(
                 x=x,
                 route_mask=route_mask,
                 w=w_up,
@@ -99,7 +105,7 @@ class BMSparseMLPKernel(_PruningMLPKernel):
                     **kwargs,
                 )
                 meta.update(**kwargs)
-                res, _ = BMSparseMLP.kernel(
+                res, _ = backend_dispatch(backend=kwargs.get('backend', 'triton')).kernel(
                     x=res,
                     route_mask=route_mask,
                     w=w_down,
@@ -108,7 +114,7 @@ class BMSparseMLPKernel(_PruningMLPKernel):
                     **meta,
                 )
             elif impl == 'seperate_2':
-                up, meta = BMSparseMLP.kernel(
+                up, meta = backend_dispatch(backend=kwargs.get('backend', 'triton')).kernel(
                     x=x,
                     route_mask=route_mask,
                     w=w_up,
@@ -117,7 +123,7 @@ class BMSparseMLPKernel(_PruningMLPKernel):
                     **kwargs,
                 )
                 meta.update(**kwargs)
-                gate, _ = BMSparseMLP.kernel(
+                gate, _ = backend_dispatch(backend=kwargs.get('backend', 'triton')).kernel(
                     x=x,
                     route_mask=route_mask,
                     w=w_gate,
@@ -127,7 +133,7 @@ class BMSparseMLPKernel(_PruningMLPKernel):
                     **meta,
                 )
                 res = gate * up
-                res, _ = BMSparseMLP.kernel(
+                res, _ = backend_dispatch(backend=kwargs.get('backend', 'triton')).kernel(
                     x=res,
                     route_mask=route_mask,
                     w=w_down,
@@ -386,8 +392,7 @@ class BMSparseMLPKernel(_PruningMLPKernel):
                     activation='silu',
                 )
             else:
-                func = partial(
-                    self.forward,
+                func_kwargs = dict(
                     x=x,
                     w_up=up.weight,
                     b_up=up.bias,
@@ -399,6 +404,17 @@ class BMSparseMLPKernel(_PruningMLPKernel):
                     route_mask=mask['up'][:, :M].to(device) > sparsity,
                     estimated_sparsity=sparsity,
                     prefill_impl=provider if provider != 'triton' else impl,
+                )
+
+                if '.' in provider:
+                    backend = provider.split('.')[-1]
+                    func_kwargs['prefill_impl'] = func_kwargs['prefill_impl'].split('.')[0]
+                else: backend = 'triton'
+                func_kwargs['backend'] = backend
+
+                func = partial(
+                    self.forward,
+                    **func_kwargs,
                 )
 
             with torch.no_grad():
