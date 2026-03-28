@@ -27,6 +27,7 @@ def parse_args():
     parser.add_argument("--num_repeat", type=int, default=500, help="Number of repeat iterations")
     parser.add_argument("--cuda_graph", action="store_true", help="Enable CUDA graph")
     parser.add_argument("--liger_kernel", action="store_true", help="Enable Liger Kernel")
+    parser.add_argument("--inplace_update_kvcache", action="store_true", help="Enable inplace update kvcache")
     parser.add_argument("--torch_profiler", action="store_true", help="Enable torch profiler")
     parser.add_argument("--ncu_profiler", action="store_true", help="Enable ncu profiler")
 

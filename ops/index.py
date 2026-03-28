@@ -117,16 +117,18 @@ class StructuredIndex(BaseIndex):
         rounding: Optional[str|int]='',
         **kwargs,
     ) -> torch.Tensor:
+        sparsity = max(0, min(1, sparsity))
         k = int(shape[dim] * sparsity) if (k < 1 or k > shape[dim]) else k
+        sparsity = sparsity if sparsity >= 0 and sparsity <= 1 else k / shape[dim]
 
         # handle rounding strategy
         if rounding == 'even':
             if k % 2 != 0: k += 1
         elif rounding == 'odd':
             if k % 2 == 0: k -= 1
-        elif isinstance(rounding, int):
+        elif isinstance(rounding, int) and k > rounding and sparsity > 0:
             # round to the nearest multiple of rounding
-            if k % rounding !=0: k = rounding * ((k + rounding - 1) // rounding)
+            if k % rounding != 0: k = rounding * ((k + rounding - 1) // rounding)
 
         indices = random.sample(range(shape[dim]), k=k)
         indices = sorted(indices)
@@ -256,7 +258,7 @@ class StructuredIndex(BaseIndex):
                     dim=prune_dim,
                     sparsity=1 - sparsity,
                     device=device,
-                    rounding='',
+                    rounding=16,
                 )
             
             for module_name in src_targets:

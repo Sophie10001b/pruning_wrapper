@@ -74,7 +74,12 @@ class SparseAttention(PrunedAttention):
 
         if past_key_values is not None:
             # sin and cos are specific to RoPE models; cache_position needed for the static cache
-            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+            cache_kwargs = {
+                "sin": sin,
+                "cos": cos,
+                "cache_position": cache_position,
+                "inplace_update_kvcache": kwargs.get('inplace_update_kvcache', False),
+            }
             k, v = past_key_values.update(k, v, self.layer_idx, cache_kwargs)
         
         input_kwargs = dict(

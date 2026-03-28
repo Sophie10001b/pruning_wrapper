@@ -223,6 +223,7 @@ class ModelProfiler:
             input_ids=dummy_kv_cache,
             attention_mask=torch.ones_like(dummy_kv_cache, dtype=torch.bool),
             use_cache=True,
+            inplace_update_kvcache=kwargs.get('inplace_update_kvcache', False),
             estimated_sparsity=kwargs.get('sparsity', 0.0),
             batch_size=batch_size,
             query_len=seq_len,

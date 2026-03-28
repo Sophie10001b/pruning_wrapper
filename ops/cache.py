@@ -41,8 +41,13 @@ class DynamicLayerSeqFirst(CacheLayerMixin):
         if self.keys is None:
             self.lazy_initialization(key_states)
 
-        self.keys = torch.cat([self.keys, key_states], dim=1)
-        self.values = torch.cat([self.values, value_states], dim=1)
+        cur_len = self.get_seq_length()
+        if cur_len > 0 and cache_kwargs.get('inplace_update_kvcache', False):
+            self.keys[:, :key_states.shape[1]] = key_states
+            self.values[:, :value_states.shape[1]] = value_states
+        else:
+            self.keys = torch.cat([self.keys, key_states], dim=1)
+            self.values = torch.cat([self.values, value_states], dim=1)
         return self.keys, self.values
 
     def get_mask_sizes(self, cache_position: torch.Tensor) -> tuple[int, int]:
