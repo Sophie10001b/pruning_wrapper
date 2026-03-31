@@ -13,6 +13,73 @@ from ops.utils import get_autotune_config, get_autotune_cache, check_shared_memo
 #########################
 # Kernel Implementation
 #########################
+def bm_sort_mlp_gemv_impl(
+    x: tl.tensor, # [M, K]
+    route_mask: tl.tensor, # [M]
+    w: tl.tensor, # [N, K]
+    b: tl.tensor,
+    out: tl.tensor,
+    M: tl.int64,
+    N: tl.int64,
+    K: tl.int64,
+    HAS_BIAS: tl.constexpr,
+    SPLIT_K: tl.constexpr,
+    ACTIVATION: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    GROUP_SIZE: tl.constexpr,
+):
+    tmid, tnid, kid = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    BLOCK_NUM_M, BLOCK_NUM_N = tl.num_programs(0), tl.num_programs(1)
+
+    # compute indices in groups
+    # Group 1: B[0:BN], B[BN:2BN], ... B[(G-1)*BN:G*BN] -> A[0:BM]
+    mid, nid = tl.swizzle2d(tmid, tnid, BLOCK_NUM_M, BLOCK_NUM_N, GROUP_SIZE)
+
+    acc = tl.zeros((BLOCK_N,), dtype=tl.float32)
+    query_mask = tl.load(route_mask + mid)
+    if query_mask != 0:
+        split_k_size = tl.cdiv(K, SPLIT_K)
+        bn_offset = nid * BLOCK_N + tl.arange(0, BLOCK_N)
+        bn_offset = tl.max_contiguous(tl.multiple_of(bn_offset, BLOCK_N), BLOCK_N)
+        bk_offset = kid * BLOCK_K + tl.arange(0, BLOCK_K)
+        for i in tl.range(0, tl.cdiv(split_k_size, BLOCK_K)):
+            x_data = tl.load(
+                x + mid * K + bk_offset,
+                mask=bk_offset < K,
+                other=0,
+            )
+            w_data = tl.load(
+                w + bn_offset[:, None] * K + bk_offset[None, :],
+                mask=bk_offset[None, :] < K,
+                other=0,
+            )
+
+            acc += tl.sum((x_data[None, :] * w_data).to(tl.float32), axis=1)
+            bk_offset += BLOCK_K * SPLIT_K
+        
+        if SPLIT_K == 1:
+            if HAS_BIAS:
+                acc += (tl.load(b + bn_offset, mask=bn_offset < N, other=0).to(tl.float32))
+            
+            if ACTIVATION == 'silu':
+                acc *= tl.sigmoid(acc)
+            if ACTIVATION == 'relu':
+                acc = tl.maximum(acc, 0)
+            
+            tl.store(
+                out + mid * N + bn_offset,
+                acc.to(x.dtype.element_ty),
+                mask=(bn_offset < N),
+            )
+        else:
+            tl.atomic_add(
+                out + mid * N + bn_offset,
+                acc.to(x.dtype.element_ty),
+                mask=(bn_offset < N),
+                sem='relaxed',
+            )
+
 
 def bm_sort_mlp_impl(
     x: tl.tensor, # [M, K]
@@ -329,6 +396,7 @@ class BMSparseMLP:
         BLOCK_K: Optional[int]=32,
         SPLIT_K: Optional[int]=1,
         GROUP_SIZE: Optional[int]=4,
+        use_gemv: Optional[bool]=False,
         num_stages: Optional[int]=3,
         num_warps: Optional[int]=4,
         do_not_specialize: Optional[List]=['M'],
@@ -343,44 +411,69 @@ class BMSparseMLP:
         x_flat = x.reshape((M, D))
         m_sort = kwargs.get('m_sort', None)
         m_sort_indices = kwargs.get('m_sort_indices', None)
+        if not use_gemv:
+            if m_sort_indices is None:
+                m_flat = route_mask.flatten(0, 1)
+                m_sort, m_sort_indices = torch.sort(m_flat, descending=True, stable=False)
 
-        if m_sort_indices is None:
+                if kwargs.get('is_offline', False):
+                    # offline calculate skipping
+                    m_sort_indices = m_sort_indices.masked_fill(m_sort.logical_not(), -1)
+                    m_sort = torch.nn.functional.pad(m_sort, (0, BLOCK_M - M % BLOCK_M), value=0).reshape(-1, BLOCK_M)
+                    m_sort = m_sort.any(dim=-1)
+            
+            out = torch.zeros((M, N), dtype=x.dtype, device=x.device)
+            grid = lambda meta: (triton.cdiv(M, meta['BLOCK_M']), triton.cdiv(N, meta['BLOCK_N']), meta['SPLIT_K'])
+            config = get_autotune_config(
+                params=['BLOCK_M', 'BLOCK_N', 'BLOCK_K', 'SPLIT_K', 'GROUP_SIZE', 'num_stages'],
+                BLOCK_M=BLOCK_M,
+                BLOCK_N=BLOCK_N,
+                BLOCK_K=BLOCK_K,
+                SPLIT_K=SPLIT_K,
+                GROUP_SIZE=GROUP_SIZE,
+                num_stages=num_stages,
+                **kwargs,
+            )
+            kernel = get_autotune_cache(
+                bm_sort_mlp_impl,
+                enable_autotune=True,
+                config=config,
+                keys=['M', 'N', 'K'],
+            )
+            kernel[grid](
+                x_flat, m_sort, m_sort_indices,
+                w, b, out,
+                M, N, K,
+                HAS_BIAS=b is not None,
+                ACTIVATION=kwargs.get('activation', 'identity'),
+                IS_OFFLINE=kwargs.get('is_offline', False),
+            )
+        else:
             m_flat = route_mask.flatten(0, 1)
-            m_sort, m_sort_indices = torch.sort(m_flat, descending=True, stable=False)
-
-            if kwargs.get('is_offline', False):
-                # offline calculate skipping
-                m_sort_indices = m_sort_indices.masked_fill(m_sort.logical_not(), -1)
-                m_sort = torch.nn.functional.pad(m_sort, (0, BLOCK_M - M % BLOCK_M), value=0).reshape(-1, BLOCK_M)
-                m_sort = m_sort.any(dim=-1)
-        
-        out = torch.zeros((M, N), dtype=x.dtype, device=x.device)
-        grid = lambda meta: (triton.cdiv(M, meta['BLOCK_M']), triton.cdiv(N, meta['BLOCK_N']), meta['SPLIT_K'])
-
-        config = get_autotune_config(
-            params=['BLOCK_M', 'BLOCK_N', 'BLOCK_K', 'SPLIT_K', 'GROUP_SIZE', 'num_stages'],
-            BLOCK_M=BLOCK_M,
-            BLOCK_N=BLOCK_N,
-            BLOCK_K=BLOCK_K,
-            SPLIT_K=SPLIT_K,
-            GROUP_SIZE=GROUP_SIZE,
-            num_stages=num_stages,
-            **kwargs,
-        )
-        kernel = get_autotune_cache(
-            bm_sort_mlp_impl,
-            enable_autotune=True,
-            config=config,
-            keys=['M', 'N', 'K'],
-        )
-        kernel[grid](
-            x_flat, m_sort, m_sort_indices,
-            w, b, out,
-            M, N, K,
-            HAS_BIAS=b is not None,
-            ACTIVATION=kwargs.get('activation', 'identity'),
-            IS_OFFLINE=kwargs.get('is_offline', False),
-        )
+            out = torch.zeros((M, N), dtype=x.dtype, device=x.device)
+            grid = lambda meta: (M, triton.cdiv(N, meta['BLOCK_N']), meta['SPLIT_K'])
+            config = get_autotune_config(
+                params=['BLOCK_N', 'BLOCK_K', 'SPLIT_K', 'GROUP_SIZE', 'num_stages'],
+                BLOCK_N=BLOCK_N,
+                BLOCK_K=BLOCK_K,
+                SPLIT_K=SPLIT_K,
+                GROUP_SIZE=GROUP_SIZE,
+                num_stages=num_stages,
+                **kwargs,
+            )
+            kernel = get_autotune_cache(
+                bm_sort_mlp_gemv_impl,
+                enable_autotune=True,
+                config=config,
+                keys=['M', 'N', 'K'],
+            )
+            kernel[grid](
+                x_flat, m_flat,
+                w, b, out,
+                M, N, K,
+                HAS_BIAS=b is not None,
+                ACTIVATION=kwargs.get('activation', 'identity'),
+            )
 
         return rearrange(out, '(B L) N -> B L N', B=B, N=N), dict(
             m_sort=m_sort,
@@ -446,6 +539,7 @@ class BMSparseMLP:
 
             SPLIT_K = 1
             SPLIT_K_list = [1]
+            use_gemv = M == 1
 
             while not check_shared_memory_gemm(BLOCK_M, BLOCK_N, BLOCK_K, num_stages, dtype.itemsize):
                 if BLOCK_K > 32: BLOCK_K >>= 1
@@ -455,12 +549,24 @@ class BMSparseMLP:
                 else: break
             
             # split-k active
-            if triton.cdiv(M, BLOCK_M) * triton.cdiv(N, BLOCK_N) < num_sm:
+            if triton.cdiv(M, BLOCK_M) * triton.cdiv(N, BLOCK_N) < num_sm and not use_gemv:
                 SPLIT_K_list = [2, 3, 4, 5, 6]
                 min_waste = 1.0
                 best_split_k = 2
                 for split_k in SPLIT_K_list:
                     waste = float(num_sm - ((triton.cdiv(M, BLOCK_M) * triton.cdiv(N, BLOCK_N) * split_k) % num_sm)) / float(num_sm)
+                    if (min_waste > 0 and waste < min_waste):
+                        min_waste = waste
+                        best_split_k = split_k
+                
+                SPLIT_K = best_split_k
+            
+            elif M * triton.cdiv(N, BLOCK_N) < num_sm and use_gemv:
+                SPLIT_K_list = [2, 3, 4, 5, 6]
+                min_waste = 1.0
+                best_split_k = 2
+                for split_k in SPLIT_K_list:
+                    waste = float(num_sm - ((M * triton.cdiv(N, BLOCK_N) * split_k) % num_sm)) / float(num_sm)
                     if (min_waste > 0 and waste < min_waste):
                         min_waste = waste
                         best_split_k = split_k
@@ -491,6 +597,7 @@ class BMSparseMLP:
             num_warps=num_warps,
             route_mask=route_mask,
             is_offline=is_offline,
+            use_gemv=use_gemv,
             BLOCK_M_list=[16, 32, 64, 128],
             BLOCK_N_list=[64, 128],
             BLOCK_K_list=[32, 64],

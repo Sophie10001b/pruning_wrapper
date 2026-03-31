@@ -276,6 +276,7 @@ class QuerySparseAttentionKernel(_PruningAttentionKernel):
                     k=k,
                     v=v,
                     attention_mask=None,
+                    pad_offset=torch.zeros((bsz,), dtype=torch.int32, device=device),
                     route_mask=None,
                 )
             else:
@@ -284,7 +285,7 @@ class QuerySparseAttentionKernel(_PruningAttentionKernel):
                     k=k,
                     v=v,
                     route_mask=(mask[:bsz, :seqlen_q] > sparsity).to(device),
-                    pad_offset=torch.zeros((bsz, seqlen_q), dtype=torch.int32, device=device),
+                    pad_offset=torch.zeros((bsz,), dtype=torch.int32, device=device),
                     estimated_sparsity=sparsity,
                 )
                 if 'prefill' in mode: func_kwargs['prefill_impl'] = provider if provider != 'triton' else impl

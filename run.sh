@@ -28,6 +28,7 @@ if [[ $nsys_profile == 0 ]]; then
         --batch_size ${batch_size[@]} \
         --seq_len ${seq_len[@]} \
         --liger_kernel \
+        --inplace_update_kvcache \
         --cuda_graph
 
 else
@@ -44,5 +45,6 @@ else
         --sparsity $sparsity \
         --batch_size ${batch_size[@]} \
         --seq_len ${seq_len[@]} \
+        --inplace_update_kvcache \
         --liger_kernel
 fi

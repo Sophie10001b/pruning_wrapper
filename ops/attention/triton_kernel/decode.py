@@ -547,7 +547,7 @@ class DenseDecode:
 
         BLOCK_M = max(16, triton.next_power_of_2(G))
         BLOCK_N = min(64, max(16, triton.next_power_of_2(LK)))
-        num_stages = 3
+        num_stages = 2
         num_warps = 4
 
         num_split = 1
@@ -695,7 +695,7 @@ class QuerySparseDecode:
 
         BLOCK_M = max(16, triton.next_power_of_2(G))
         BLOCK_N = min(64, max(16, triton.next_power_of_2(LK)))
-        num_stages = 3
+        num_stages = 2
         num_warps = 4
 
         num_split = 1
@@ -844,7 +844,7 @@ class GroupSparseDecode:
 
         BLOCK_M = max(16, triton.next_power_of_2(G))
         BLOCK_N = min(64, max(16, triton.next_power_of_2(LK)))
-        num_stages = 3
+        num_stages = 2
         num_warps = 4
 
         num_split = 1
@@ -993,7 +993,7 @@ class HeadSparseDecode:
         if pad_offset is None: pad_offset = torch.zeros((B,), dtype=torch.int32, device=device)
 
         BLOCK_N = min(64, max(16, triton.next_power_of_2(LK)))
-        num_stages = 3
+        num_stages = 2
         num_warps = 4
 
         num_split = 1
