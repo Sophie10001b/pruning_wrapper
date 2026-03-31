@@ -2,7 +2,7 @@ cache_type: base
 
 attention:
   estimated_sparsity: -1
-  pruning_type: blasst
-  backend: triton
+  pruning_type: seer
+  backend: tilelang
   threshold: -1
   enable_autotune: false

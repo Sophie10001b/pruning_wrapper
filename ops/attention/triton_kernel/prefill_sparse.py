@@ -300,7 +300,7 @@ class SparseAttentionPrefill:
         **kwargs
     ):
         """
-        Get kernel for P@V sparse attention (prefill)\\
+        Get kernel for sparse attention (prefill)\\
         Return [batch_size, query_length, num_query_heads, head_dim]
         Args:
             q, k, v: torch.Tensor with shape [batch_size, seqlen, num_heads, head_dim]

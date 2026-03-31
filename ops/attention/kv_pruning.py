@@ -53,11 +53,11 @@ class BlockSparseAttentionKernel(_PruningAttentionKernel):
         threshold: float,
         pad_offset: Optional[torch.Tensor]=None,
         execute_block: Optional[torch.Tensor]=None,
-        impl: Optional[str]='blasst',
+        impl: Optional[str]='seer',
         **kwargs,
     ):
         """
-        An implementation of blasst style sparse attention (causal) in prefill.
+        An implementation of sparse attention (causal) in prefill.
 
         The main pipeline is based on FLA's prefill flash-attn kernel.
 
@@ -91,11 +91,11 @@ class BlockSparseAttentionKernel(_PruningAttentionKernel):
         threshold: float,
         pad_offset: Optional[torch.Tensor]=None,
         execute_block: Optional[torch.Tensor]=None,
-        impl: Optional[str]='blasst',
+        impl: Optional[str]='seer',
         **kwargs,
     ):
         """
-        An implementation of blasst style sparse attention (causal) in decode with XQA.
+        An implementation of sparse attention (causal) in decode with XQA.
 
         The main pipeline is based on FLA's prefill flash-attn kernel.
 
@@ -130,8 +130,8 @@ class BlockSparseAttentionKernel(_PruningAttentionKernel):
         block_size: Optional[int]=64,
         pad_offset: Optional[torch.Tensor]=None,
         execute_block: Optional[torch.Tensor]=None,
-        prefill_impl: Optional[str]='blasst',
-        decode_impl: Optional[str]='blasst',
+        prefill_impl: Optional[str]='seer',
+        decode_impl: Optional[str]='seer',
         enable_autotune: Optional[bool]=False,
         **kwargs,
     ):
