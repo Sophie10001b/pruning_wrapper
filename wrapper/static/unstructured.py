@@ -65,7 +65,8 @@ class UnstructuredDecoderLayer(DenseDecoderLayer):
                     device=component.weight.device,
                     block_size=block_size,
                 )
-                __MASK__[pruning_type].monkey_patch(component, mask, **kwargs)
+                kwargs.update(settings)
+                setattr(getattr(self, prefix), suffix, __MASK__[pruning_type].monkey_patch(component, mask, **kwargs))
                 pruning_kwargs[name] = mask
         
                 self.is_pruned = True

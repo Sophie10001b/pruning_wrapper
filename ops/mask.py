@@ -42,7 +42,7 @@ class UnstructuredMask:
         device: Optional[torch.device]=None,
         **kwargs,
     ) -> torch.Tensor:
-        return torch.rand(shape, device=device) < sparsity
+        return (torch.rand(shape, device=device) < sparsity).to(torch.bool)
     
     @classmethod
     def monkey_patch(
@@ -55,6 +55,7 @@ class UnstructuredMask:
             mask = cls.random_sample(module.weight.shape, device=module.weight.device, **kwargs)
         
         module.weight *= mask.to(module.weight.dtype)
+        return module
 
 class SemiStructuredMask:
     @classmethod
@@ -77,7 +78,7 @@ class SemiStructuredMask:
         rows = torch.arange(mask.shape[0], device=device).view(-1, 1).expand(-1, left)
         mask[rows, indices] = False
         mask = mask.reshape(shape)
-        return mask
+        return mask.to(torch.bool)
     
     @classmethod
     def monkey_patch(
@@ -93,8 +94,8 @@ class SemiStructuredMask:
         
         backend = kwargs.get('backend', 'torch')
         if backend == 'torch':
-            module = TorchCuSPARSELtLinear(module.weight, mask)
+            return TorchCuSPARSELtLinear(module.weight, mask)
         elif backend == 'cusparselt':
-            module = CuSPARSELtLinear(module.weight, mask)
+            return CuSPARSELtLinear(module.weight, mask)
         else:
             raise ValueError(f"Unknown semi_structured backend: {backend}")

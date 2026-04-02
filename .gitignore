@@ -10,3 +10,4 @@ profile_result
 *.log
 /build
 /profiler_logs
+/metric_results

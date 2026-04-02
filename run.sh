@@ -6,8 +6,8 @@ model_path=...
 benchmark_metric=ttft
 num_repeat=10
 
-batch_size=(1)
-seq_len=(32768)
+batch_size=(1 8 16 32)
+seq_len=(1024)
 sparsity=(0.5)
 
 dynamic=static
@@ -48,3 +48,123 @@ else
         --inplace_update_kvcache \
         --liger_kernel
 fi
+
+dynamic=static
+style=unstructured
+config_name=unstructured
+
+python main.py \
+    --model_name $model_name \
+    --model_path $model_path \
+    --dynamic $dynamic \
+    --style $style \
+    --config_name $config_name \
+    --benchmark_metric $benchmark_metric \
+    --num_warmup 1 \
+    --num_repeat $num_repeat \
+    --sparsity ${sparsity[@]} \
+    --batch_size ${batch_size[@]} \
+    --seq_len ${seq_len[@]} \
+    --liger_kernel \
+    --inplace_update_kvcache \
+    --cuda_graph
+
+dynamic=static
+style=structured
+config_name=structured_sublayer
+
+python main.py \
+    --model_name $model_name \
+    --model_path $model_path \
+    --dynamic $dynamic \
+    --style $style \
+    --config_name $config_name \
+    --benchmark_metric $benchmark_metric \
+    --num_warmup 1 \
+    --num_repeat $num_repeat \
+    --sparsity ${sparsity[@]} \
+    --batch_size ${batch_size[@]} \
+    --seq_len ${seq_len[@]} \
+    --liger_kernel \
+    --inplace_update_kvcache \
+    --cuda_graph
+
+dynamic=static
+style=structured
+config_name=structured_nk
+
+python main.py \
+    --model_name $model_name \
+    --model_path $model_path \
+    --dynamic $dynamic \
+    --style $style \
+    --config_name $config_name \
+    --benchmark_metric $benchmark_metric \
+    --num_warmup 1 \
+    --num_repeat $num_repeat \
+    --sparsity ${sparsity[@]} \
+    --batch_size ${batch_size[@]} \
+    --seq_len ${seq_len[@]} \
+    --liger_kernel \
+    --inplace_update_kvcache \
+    --cuda_graph
+
+dynamic=static
+style=structured
+config_name=structured_kn
+
+python main.py \
+    --model_name $model_name \
+    --model_path $model_path \
+    --dynamic $dynamic \
+    --style $style \
+    --config_name $config_name \
+    --benchmark_metric $benchmark_metric \
+    --num_warmup 1 \
+    --num_repeat $num_repeat \
+    --sparsity ${sparsity[@]} \
+    --batch_size ${batch_size[@]} \
+    --seq_len ${seq_len[@]} \
+    --liger_kernel \
+    --inplace_update_kvcache \
+    --cuda_graph
+
+dynamic=token_dynamic
+style=skipgpt
+config_name=bm
+
+python main.py \
+    --model_name $model_name \
+    --model_path $model_path \
+    --dynamic $dynamic \
+    --style $style \
+    --config_name $config_name \
+    --benchmark_metric $benchmark_metric \
+    --num_warmup 1 \
+    --num_repeat $num_repeat \
+    --sparsity ${sparsity[@]} \
+    --batch_size ${batch_size[@]} \
+    --seq_len ${seq_len[@]} \
+    --liger_kernel \
+    --inplace_update_kvcache \
+    --cuda_graph
+
+dynamic=token_dynamic
+style=sparse_attention
+config_name=sparse_attention
+
+python main.py \
+    --model_name $model_name \
+    --model_path $model_path \
+    --dynamic $dynamic \
+    --style $style \
+    --config_name $config_name \
+    --benchmark_metric $benchmark_metric \
+    --num_warmup 1 \
+    --num_repeat $num_repeat \
+    --sparsity ${sparsity[@]} \
+    --batch_size ${batch_size[@]} \
+    --seq_len ${seq_len[@]} \
+    --liger_kernel \
+    --inplace_update_kvcache \
+    --cuda_graph

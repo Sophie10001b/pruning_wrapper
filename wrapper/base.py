@@ -29,6 +29,7 @@ class PrunedMLP(nn.Module):
         self.hidden_size = config.hidden_size
         self.intermediate_size = config.intermediate_size
         self.activation = config.hidden_act
+        self.act_fn = block.act_fn
 
         self.up_proj = block.up_proj
         self.gate_proj = block.gate_proj

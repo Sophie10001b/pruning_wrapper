@@ -229,14 +229,8 @@ struct StructuredSparseKernel {
                                                     CUSPARSELT_MATMUL_ALG_DEFAULT));
     CHECK_CUSPARSE(cusparseLtMatmulPlanInit(&shared->handle, &state->plan, &state->mm_desc, &state->alg_desc));
 
-    void* c_tmp = nullptr;
-    void* d_tmp = nullptr;
-    CHECK_CUDA(cudaMalloc(&c_tmp, static_cast<size_t>(kN * kP * sizeof(DType))));
-    CHECK_CUDA(cudaMalloc(&d_tmp, static_cast<size_t>(kN * kP * sizeof(DType))));
     CHECK_CUSPARSE(cusparseLtMatmulSearch(&shared->handle, &state->plan, &kAlpha, dB.data_ptr(), A.data_ptr(), &kBeta,
-                                          c_tmp, d_tmp, nullptr, &stream, 1));
-    CHECK_CUDA(cudaFree(c_tmp));
-    CHECK_CUDA(cudaFree(d_tmp));
+                                          D.data_ptr(), D.data_ptr(), nullptr, &stream, 1));
 
     CHECK_CUSPARSE(cusparseLtMatmulGetWorkspace(&shared->handle, &state->plan, &state->workspace_size));
     if (state->workspace_size > 0) {

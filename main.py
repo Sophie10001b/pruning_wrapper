@@ -39,7 +39,7 @@ def main():
 
     if args.liger_kernel:
         from liger_kernel.transformers import apply_liger_kernel_to_llama, apply_liger_kernel_to_qwen3, apply_liger_kernel_to_qwen2
-        liger_kernel_kwargs = {'rope': True, 'rms_norm': True, 'swiglu': True}
+        liger_kernel_kwargs = {'rope': False, 'rms_norm': True, 'swiglu': False}
         apply_liger_kernel_to_llama(**liger_kernel_kwargs)
         apply_liger_kernel_to_qwen2(**liger_kernel_kwargs)
         apply_liger_kernel_to_qwen3(**liger_kernel_kwargs)

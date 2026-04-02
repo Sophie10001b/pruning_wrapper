@@ -46,21 +46,10 @@ class DenseMLP(PrunedMLP):
 
         with nvtx.annotate("glu", color='green'):
             with record_function("glu"):
-                glu_output = self.mlp_impl(
-                    hidden_states,
-                    w_up=self.up_proj.weight,
-                    w_gate=self.gate_proj.weight,
-                    b_up=self.up_proj.bias,
-                    b_gate=self.gate_proj.bias,
-                    activation=self.activation,
-                )
+                glu_output = self.act_fn(self.gate_proj(hidden_states)) * self.up_proj(hidden_states)
         with nvtx.annotate("down_proj", color='green'):
             with record_function("down_proj"):
-                ffn_output = self.mlp_impl(
-                    glu_output,
-                    w_up=self.down_proj.weight,
-                    b_down=self.down_proj.bias,
-                )
+                ffn_output = self.down_proj(glu_output)
         return ffn_output + residual
 
 #################### ATTN ####################

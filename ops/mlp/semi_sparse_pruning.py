@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Optional, Sequence, Tuple
 from einops import rearrange
 from functools import lru_cache
 from collections import namedtuple
+from torch.sparse.semi_structured import SparseSemiStructuredTensorCUSPARSELT
 from sglang.jit_kernel.utils import (
     cache_once,
     is_arch_support_pdl,
@@ -23,8 +24,6 @@ from .utils import (
     DEFAULT_CUDA_CFLAGS,
     DEFAULT_LDFLAGS,
 )
-
-from .base import _PruningMLPKernel
 
 if TYPE_CHECKING:
     from tvm_ffi.module import Module
@@ -59,7 +58,7 @@ def _jit_cusparselt_spmm_module(
     return load_jit(
         "cusparselt_spmm",
         *args,
-        cuda_files=[str(ROOT_PATH / "include" / "sparse_tensor_core_cusparselt.cuh")],
+        cuda_files=[str(ROOT_PATH / "jit_kernel" / "cusparselt_spmm.cuh")],
         cuda_wrappers=[
             ("init", f"StructuredSparseKernel<{args}>::init"),
             ("compress", f"StructuredSparseKernel<{args}>::compress"),
@@ -122,8 +121,8 @@ class CuSPARSELtLinear(torch.nn.Module):
     def _evict_oldest_plan(self) -> None:
         padded_m, plan_state = self._plan_cache.popitem(last=False)
         self.cusparselt_wrapper.destroy_plan(plan_state, self._base_state)
-        self._input_scratch_cache.pop(padded_m, None)
-        self._output_scratch_cache.pop(padded_m, None)
+        # self._input_scratch_cache.pop(padded_m, None)
+        # self._output_scratch_cache.pop(padded_m, None)
 
     def _get_input_scratch(self, padded_m: int, x: torch.Tensor) -> torch.Tensor:
         scratch = self._input_scratch_cache.get(padded_m)
@@ -153,13 +152,14 @@ class CuSPARSELtLinear(torch.nn.Module):
             return plan_state
 
         padded_m = self._padded_tokens(M)
-        out_nt = self._get_output_scratch(padded_m, x)
+        out_nt = torch.empty((self.N, padded_m), dtype=x.dtype, device=x.device)
         plan_state = torch.zeros((1,), dtype=torch.uint64, device="cpu")
         self.cusparselt_wrapper.update(
             x, out_nt, self.weight, self._base_state, plan_state
         )
+        out_nt.zero_()
 
-        if len(self._plan_cache) >= self._cache_num:
+        if len(self._plan_cache) >= self._cache_num and len(self._plan_cache) > 0:
             self._evict_oldest_plan()
 
         self._plan_cache[M] = plan_state
@@ -168,19 +168,24 @@ class CuSPARSELtLinear(torch.nn.Module):
     def forward(
         self, x: torch.Tensor, output: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
+        if not x.is_contiguous(): x = x.contiguous()
+        M_size = x.shape[:2] if x.dim() > 2 else -1
+        x = x.flatten(0, 1) if M_size != -1 else x
         x_padded, original_m, padded_m = self._pad_input(x)
 
         if padded_m != original_m:
-            x_padded = self._get_input_scratch(padded_m, x)
-            x_padded[:original_m].copy_(x)
-            x_padded[original_m:].zero_()
+            # x_padded = self._get_input_scratch(padded_m, x)
+            # x_padded = torch.empty((padded_m, x.shape[1]), dtype=x.dtype, device=x.device)
+            # x_padded[:original_m].copy_(x)
+            x_padded = torch.nn.functional.pad(x_padded, (0, 0, 0, padded_m - original_m), value=0)
+            # x_padded[original_m:].zero_()
 
         if output is not None:
             assert output.shape == (original_m, self.N)
             assert output.dtype == x.dtype
             assert output.device == x.device
             assert output.is_contiguous()
-            out_nt = self._get_output_scratch(padded_m, x)
+            out_nt = output.t()
         else:
             out_nt = torch.empty((self.N, padded_m), dtype=x.dtype, device=x.device)
 
@@ -193,7 +198,7 @@ class CuSPARSELtLinear(torch.nn.Module):
         if output is not None:
             output.copy_(out)
             return output
-        return out
+        return out if M_size == -1 else out.reshape(*M_size, -1)
 
     def __del__(self):
         wrapper = getattr(self, "cusparselt_wrapper", None)
@@ -216,7 +221,7 @@ class CuSPARSELtLinear(torch.nn.Module):
 from torch.sparse.semi_structured import SparseSemiStructuredTensor
 
 @lru_cache
-def search_for_alg_id(A: SparseSemiStructuredTensor, B_shape: torch.Size) -> Tuple[int, int, int]:
+def search_for_alg_id(A: SparseSemiStructuredTensor, B_shape: Tuple[int]) -> Tuple[int, int, int]:
     B = torch.rand(B_shape, device=A.device, dtype=A.dtype)
     alg_id, split_k, split_k_mode, _ = torch._C._cusparselt.mm_search(A.packed, B.t(), None, None, None, False)
     print(f"[INFO] spmm ALG_ID = {alg_id}, split_k = {split_k}, split_k_mode = {split_k_mode} for shape A{B.shape} @ B{A.shape}")
@@ -234,8 +239,7 @@ class TorchCuSPARSELtLinear(torch.nn.Module):
         self.weight = torch.nn.Parameter(weight * mask, requires_grad=False)
         self.N, self.K = self.weight.shape
 
-        self.weight = SparseSemiStructuredTensorCUSPARSELT.from_dense(self.weight)
-        self.weight = torch.nn.Parameter(self.weight, requires_grad=False)
+        self.weight = torch.nn.Parameter(SparseSemiStructuredTensorCUSPARSELT.from_dense(self.weight), requires_grad=False)
         self._cache_num = cache_num
         self._plan_cache: OrderedDict[int, Tuple[int, int, int]] = OrderedDict()
     
@@ -249,7 +253,9 @@ class TorchCuSPARSELtLinear(torch.nn.Module):
             self._plan_cache.move_to_end(M)
             return plan_state
 
-        plan_state = search_for_alg_id(self.weight, x.shape)
+        input_shape = list(x.shape)
+        input_shape[0] = max(8, input_shape[0])
+        plan_state = search_for_alg_id(self.weight, tuple(input_shape))
         if len(self._plan_cache) >= self._cache_num:
             self._evict_oldest_plan()
 
@@ -257,17 +263,22 @@ class TorchCuSPARSELtLinear(torch.nn.Module):
         return plan_state
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x_flatten = x.flatten(0, 1) if x.dim() > 2 else x
-        plan_state = self._get_plan_state(x_flatten)
-        return torch._cslt_sparse_mm(
-            self.weight.packed,
-            x,
-            bias=None,
-            transpose_result=False,
+        M_size = x.shape[:2] if x.dim() > 2 else -1
+        A = x.flatten(0, 1) if x.dim() > 2 else x
+        plan_state = self._get_plan_state(A)
+        
+        B = self.weight.data
+        assert isinstance(B, torch.sparse.SparseSemiStructuredTensor)
+        row, col = A.shape
+        A_padded = B._pad_dense_input(A)
+        res = torch._cslt_sparse_mm(
+            B.packed,
+            A_padded.t(),
             alg_id=plan_state[0],
             split_k=plan_state[1],
             split_k_mode=plan_state[2],
-        )
+        ).t()
+        return res[:row, :] if M_size == -1 else res[:row, :].reshape(*M_size, -1)
 
 def _dense_equivalent_tflops(m: int, n: int, k: int, ms: float) -> float:
     return (2.0 * m * n * k) / (ms * 1e9)
@@ -370,22 +381,6 @@ def benchmark_m_staircase(
 if __name__ == "__main__":
     dtype = torch.float16
     device = "cuda:0"
-
-    from torch.sparse.semi_structured import SparseSemiStructuredTensorCUSPARSELT
-
-    weight = torch.rand((4096, 4096), dtype=dtype, device=device)
-    mask = random_sample(weight.shape, device=device)
-    linear = CuSPARSELtLinear(deepcopy(weight), mask)
-
-    linear_ref = torch.nn.Linear(
-        weight.shape[1], weight.shape[0], bias=False, dtype=dtype, device=device
-    )
-    linear_ref.weight = torch.nn.Parameter(deepcopy(weight), requires_grad=False)
-    linear_ref.weight *= mask
-    linear_ref.weight = torch.nn.Parameter(
-        SparseSemiStructuredTensorCUSPARSELT.from_dense(linear_ref.weight),
-        requires_grad=False,
-    )
 
     benchmark_m_staircase(dtype=dtype, device=device, n=4096, k=4096)
     benchmark_m_staircase(dtype=dtype, device=device, n=14336, k=4096)
