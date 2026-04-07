@@ -284,7 +284,7 @@ def triton_rope_qk_align(
         sin,
         out_q_cos, out_q_sin,
         out_k_cos, out_k_sin,
-        B, L, M, HQ, HK, N, G,
+        B, L, M, HQ, HK, G, N,
     )
     return out_q_cos + out_q_sin, out_k_cos + out_k_sin
 

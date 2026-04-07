@@ -136,6 +136,10 @@ class BlockSparseAttentionKernel(_PruningAttentionKernel):
         **kwargs,
     ):
         assert k.dim() == 4 and q.dim() == 4
+        if not q.is_contiguous(): q = q.contiguous()
+        if not k.is_contiguous(): k = k.contiguous()
+        if not v.is_contiguous(): v = v.contiguous()
+
         if q.shape[1] > 1:
             return cls.base_prefill(q, k, v, threshold, pad_offset, execute_block, block_size=block_size, impl=prefill_impl, enable_autotune=enable_autotune, **kwargs)
         else:
