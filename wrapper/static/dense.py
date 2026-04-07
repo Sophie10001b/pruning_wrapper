@@ -13,7 +13,7 @@ from transformers.generation import GenerationMixin
 from transformers.generation.utils import GenerateOutput
 from torch.profiler import record_function
 
-from ops import __ATTENTION__, __MLP__, __ROUTER__, __KV_CACHE__, __APPROXIMATOR__
+from ops import __ATTENTION__, __SPARSE_ATTENTION__, __THRESHOLD__, __MLP__, __KV_CACHE__, __APPROXIMATOR__
 from ops.utils import triton_rmsnorm, triton_rope_qk_align
 from wrapper.base import PrunedMLP, PrunedAttention, PrunedDecoderLayer, PrunedModelForCausalLM
 
@@ -55,7 +55,7 @@ class DenseMLP(PrunedMLP):
 #################### ATTN ####################
 class DenseAttention(PrunedAttention):
     """
-    HF style attention with FA2
+    HF style attention with FA2, support optional sparse attention
     """
     def __init__(
         self,
@@ -66,9 +66,16 @@ class DenseAttention(PrunedAttention):
         **kwargs,
     ):
         super().__init__(config, pruning_config, block, **kwargs)
-        self._support_pruning_components = []
-        self.attention_impl = __ATTENTION__['base']()
+        self._support_pruning_components = ['attention.']
+        
+        # attention pruning impl
+        for key in self._support_pruning_components:
+            prefix, suffix = key.split('.')
+            if suffix == '': setattr(self, f'{prefix}_kwargs', self.pruning_config.get(prefix, {}))
+            else: setattr(self, f'{suffix}_kwargs', self.pruning_config[prefix].get(suffix, {}))
 
+        self.attention_impl = __SPARSE_ATTENTION__[self.attention_kwargs.get('pruning_type', 'base')]()
+        self.threshold_impl = __THRESHOLD__[self.attention_kwargs.get('pruning_type', 'base')](**self.attention_kwargs)
         self.input_layernorm = input_layernorm
     
     @nvtx.annotate("Attention", color='blue')
@@ -110,13 +117,20 @@ class DenseAttention(PrunedAttention):
             }
             k, v = past_key_values.update(k, v, self.layer_idx, cache_kwargs)
         
+        input_kwargs = dict(
+            q=q, k=k, v=v,
+            attention_mask=attention_mask,
+            pad_offset=pad_offset,
+            execute_block=getattr(self, 'execute_block', None),
+            prefill_impl=self.attention_kwargs.get('pruning_type'),
+            decode_impl=self.attention_kwargs.get('pruning_type'),
+            backend=self.attention_kwargs.get('backend', 'triton'),
+        )
+        input_kwargs.update(self.threshold_impl.get_threshold_kwargs())
+        
         with nvtx.annotate("attention", color='blue'):
             with record_function("attention"):
-                attn_output = self.attention_impl(
-                    q, k, v,
-                    attention_mask=attention_mask,
-                    pad_offset=pad_offset,
-                )
+                attn_output = self.attention_impl(**input_kwargs)
         attn_output = rearrange(attn_output, '... h d -> ... (h d)')
         with nvtx.annotate("o_proj", color='blue'):
             with record_function("o_proj"):
@@ -145,9 +159,23 @@ class DenseDecoderLayer(PrunedDecoderLayer):
     
     def generate_pruning_kwargs(
         self,
+        batch_size: int,
+        query_len: int,
+        kv_cache_len: int,
+        device: Optional[torch.device]='cuda:0',
         **kwargs,
     ) -> Dict[str, torch.Tensor]:
-        return dict()
+        mask = self.self_attn.threshold_impl.generate_mask(
+            batch_size=batch_size,
+            query_len=query_len,
+            kv_cache_len=kv_cache_len,
+            num_key_heads=self.config.num_key_value_heads,
+            sparsity=self.self_attn.attention_kwargs.get('estimated_sparsity', 0),
+            device=device,
+        )
+        setattr(self.self_attn, 'execute_block', mask)
+
+        return mask
 
     def forward(
         self,
@@ -277,8 +305,11 @@ class DenseForCausalLM(PrunedModelForCausalLM):
         self.model = DenseModel(config, pruning_config, block.model, **kwargs)
     
     # Generate random route mask for benchmark
-    def generate_pruning_kwargs(self, input_ids: torch.Tensor, **kwargs) -> Dict[str, torch.Tensor]:
-        return dict()
+    def generate_pruning_kwargs(self,**kwargs) -> Dict[str, torch.Tensor]:
+        for layer in self.model.layers:
+            layer.generate_pruning_kwargs(**kwargs)
+        
+        return {}
     
     def post_load(
         self,

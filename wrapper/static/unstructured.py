@@ -31,7 +31,7 @@ class UnstructuredDecoderLayer(DenseDecoderLayer):
         **kwargs,
     ):
         super().__init__(config, pruning_config, block, layer_idx, **kwargs)
-        self._support_pruning_components = ['attention.q_proj', 'attention.k_proj', 'attention.v_proj', 'attention.o_proj', 'ffn.up_proj', 'ffn.gate_proj', 'ffn.down_proj']
+        self._support_pruning_components = ['self_attn.q_proj', 'self_attn.k_proj', 'self_attn.v_proj', 'self_attn.o_proj', 'mlp.up_proj', 'mlp.gate_proj', 'mlp.down_proj']
         self.is_pruned = False
 
         # pruning impl
@@ -42,10 +42,12 @@ class UnstructuredDecoderLayer(DenseDecoderLayer):
     
     def generate_pruning_kwargs(
         self,
-        pruning_targets: List[str]=['attention.q_proj', 'attention.k_proj', 'attention.v_proj', 'attention.o_proj', 'ffn.up_proj', 'ffn.gate_proj', 'ffn.down_proj'],
+        pruning_targets: List[str]=['self_attn.q_proj', 'self_attn.k_proj', 'self_attn.v_proj', 'self_attn.o_proj', 'mlp.up_proj', 'mlp.gate_proj', 'mlp.down_proj'],
         estimated_sparsity: Optional[float]=-1,
         **kwargs,
     ) -> Dict[str, torch.Tensor]:
+        super().generate_pruning_kwargs(**kwargs)
+
         if self.is_pruned: return {}
         with record_function("**Initialization**"):
             pruning_kwargs = {}
@@ -55,8 +57,6 @@ class UnstructuredDecoderLayer(DenseDecoderLayer):
                 pruning_type = settings.get('pruning_type', 'base')
                 block_size = settings.get('block_size', None)
 
-                if prefix == 'attention': prefix = 'self_attn'
-                elif prefix == 'ffn': prefix = 'mlp'
                 component: nn.Linear = getattr(getattr(self, prefix), suffix)
 
                 mask = __MASK__[pruning_type].random_sample(

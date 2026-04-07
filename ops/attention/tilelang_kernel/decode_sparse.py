@@ -28,13 +28,14 @@ def blasst_decode_fuse_impl(
 ):
     Hq, Hk, C = T.const('Hq, Hk, C')
     B, Tq, Tk = T.dynamic('B, Tq, Tk')
+    BSK = T.dynamic('BSK')
 
     mQ: T.Tensor[[B, Tq, Hq, C], dtype]
     mK: T.Tensor[[B, Tk, Hk, C], dtype]
     mV: T.Tensor[[B, Tk, Hk, C], dtype]
     mO: T.Tensor[[B, Tq, Hq, C], dtype]
     mPad: T.Tensor[[B], T.int32]
-    mBSMask: T.Tensor[[T.ceildiv(Tk, 16)], T.int8]
+    mBSMask: T.Tensor[[BSK], T.int8]
 
     qk_scale = sm_scale * 1.44269504
     G = Hq // Hk
@@ -120,6 +121,7 @@ def blasst_decode_split_impl(
 ):
     Hq, Hk, C = T.const('Hq, Hk, C')
     B, Tq, Tk = T.dynamic('B, Tq, Tk')
+    BSK = T.dynamic('BSK')
 
     mQ: T.Tensor[[B, Tq, Hq, C], dtype]
     mK: T.Tensor[[B, Tk, Hk, C], dtype]
@@ -128,7 +130,7 @@ def blasst_decode_split_impl(
     mO_tmp: T.Tensor[[B, Tq, Hq, SplitK, C], accum_dtype]
     mO_meta: T.Tensor[[B, Tq, Hq, 2, SplitK], accum_dtype]
     mPad: T.Tensor[[B], T.int32]
-    mBSMask: T.Tensor[[T.ceildiv(Tk, 16)], T.int8]
+    mBSMask: T.Tensor[[BSK], T.int8]
 
     qk_scale = sm_scale * 1.44269504
     G = Hq // Hk
@@ -248,13 +250,14 @@ def seer_decode_fuse_impl(
 ):
     Hq, Hk, C = T.const('Hq, Hk, C')
     B, Tq, Tk = T.dynamic('B, Tq, Tk')
+    BSQ, BSK = T.dynamic('BSQ, BSK')
 
     mQ: T.Tensor[[B, Tq, Hq, C], dtype]
     mK: T.Tensor[[B, Tk, Hk, C], dtype]
     mV: T.Tensor[[B, Tk, Hk, C], dtype]
     mO: T.Tensor[[B, Tq, Hq, C], dtype]
     mPad: T.Tensor[[B], T.int32]
-    mBSMask: T.Tensor[[B, Hk, T.ceildiv(Tq, 16), T.ceildiv(Tk, 16)], T.int8]
+    mBSMask: T.Tensor[[B, Hk, BSQ, BSK], T.int8]
 
     qk_scale = sm_scale * 1.44269504
     G = Hq // Hk
@@ -333,6 +336,7 @@ def seer_decode_split_impl(
 ):
     Hq, Hk, C = T.const('Hq, Hk, C')
     B, Tq, Tk = T.dynamic('B, Tq, Tk')
+    BSQ, BSK = T.dynamic('BSQ, BSK')
 
     mQ: T.Tensor[[B, Tq, Hq, C], dtype]
     mK: T.Tensor[[B, Tk, Hk, C], dtype]
@@ -341,7 +345,7 @@ def seer_decode_split_impl(
     mO_tmp: T.Tensor[[B, Tq, Hq, SplitK, C], accum_dtype]
     mO_meta: T.Tensor[[B, Tq, Hq, 2, SplitK], accum_dtype]
     mPad: T.Tensor[[B], T.int32]
-    mBSMask: T.Tensor[[B, Hk, T.ceildiv(Tq, 16), T.ceildiv(Tk, 16)], T.int8]
+    mBSMask: T.Tensor[[B, Hk, BSQ, BSK], T.int8]
 
     qk_scale = sm_scale * 1.44269504
     G = Hq // Hk

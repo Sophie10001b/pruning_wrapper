@@ -22,6 +22,7 @@ def blasst_prefill_impl(
 ):
     Hq, Hk, C = T.const('Hq, Hk, C')
     B, Tq, Tk = T.dynamic('B, Tq, Tk')
+    BSK = T.dynamic('BSK')
 
     BTq, BTk = T.ceildiv(Tq, BM), T.ceildiv(Tk, BN)
 
@@ -30,7 +31,7 @@ def blasst_prefill_impl(
     mV: T.Tensor[[B, Tk, Hk, C], dtype]
     mO: T.Tensor[[B, Tq, Hq, C], dtype]
     mPad: T.Tensor[[B], T.int32]
-    mBSMask: T.Tensor[[T.ceildiv(Tk, 16)], T.int8]
+    mBSMask: T.Tensor[[BSK], T.int8]
 
     qk_scale = sm_scale * 1.44269504
     G = Hq // Hk
@@ -119,6 +120,7 @@ def seer_prefill_impl(
 ):
     Hq, Hk, C = T.const('Hq, Hk, C')
     B, Tq, Tk = T.dynamic('B, Tq, Tk')
+    BSQ, BSK = T.dynamic('BSQ, BSK')
 
     BTq, BTk = T.ceildiv(Tq, BM), T.ceildiv(Tk, BN)
 
@@ -127,7 +129,7 @@ def seer_prefill_impl(
     mV: T.Tensor[[B, Tk, Hk, C], dtype]
     mO: T.Tensor[[B, Tq, Hq, C], dtype]
     mPad: T.Tensor[[B], T.int32]
-    mBSMask: T.Tensor[[B, Hk, T.ceildiv(Tq, 16), T.ceildiv(Tk, 16)], T.int8]
+    mBSMask: T.Tensor[[B, Hk, BSQ, BSK], T.int8]
 
     qk_scale = sm_scale * 1.44269504
     G = Hq // Hk

@@ -138,13 +138,20 @@ class StructuredAttention(DenseAttention):
             }
             k, v = past_key_values.update(k, v, self.layer_idx, cache_kwargs)
         
+        input_kwargs = dict(
+            q=q, k=k, v=v,
+            attention_mask=attention_mask,
+            pad_offset=pad_offset,
+            execute_block=getattr(self, 'execute_block', None),
+            prefill_impl=self.attention_kwargs.get('pruning_type'),
+            decode_impl=self.attention_kwargs.get('pruning_type'),
+            backend=self.attention_kwargs.get('backend', 'triton'),
+        )
+        input_kwargs.update(self.threshold_impl.get_threshold_kwargs())
+        
         with nvtx.annotate("attention", color='blue'):
             with record_function("attention"):
-                attn_output = self.attention_impl(
-                    q, k, v,
-                    attention_mask=attention_mask,
-                    pad_offset=pad_offset,
-                )
+                attn_output = self.attention_impl(**input_kwargs)
         attn_output = rearrange(attn_output, '... h d -> ... (h d)')
         with nvtx.annotate("o_proj", color='blue'):
             with record_function("o_proj"):
@@ -289,6 +296,9 @@ class StructuredForCausalLM(PrunedModelForCausalLM):
     
     # Generate random route mask for benchmark
     def generate_pruning_kwargs(self, **kwargs) -> Dict[str, torch.Tensor]:
+        for layer in self.model.layers:
+            layer.generate_pruning_kwargs(**kwargs)
+        
         if self.is_pruned: return {}
 
         patch_type = self.pruning_config.get('patch_type', 'structured')

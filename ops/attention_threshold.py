@@ -11,10 +11,10 @@ class BaseThreshold(nn.Module):
     def __init__(self, *args, **kwargs):
         super().__init__()
     
-    def generate_mask(self):
-        raise NotImplementedError
+    def generate_mask(self, **kwargs):
+        return None
     
-    def get_threshold_kwargs(self):
+    def get_threshold_kwargs(self, **kwargs):
         return {'threshold': -1}
 
 
@@ -28,11 +28,12 @@ class BlasstThreshold(BaseThreshold):
         kv_cache_len: int,
         sparsity: Optional[float]=0,
         device: Optional[torch.device]='cuda:0',
+        **kwargs
     ):
         block_num = (kv_cache_len + 16 - 1) // 16
         return torch.rand((block_num,), device=device) > sparsity
     
-    def get_threshold_kwargs(self):
+    def get_threshold_kwargs(self, **kwargs):
         return {'threshold': self.threshold}
 
 class SeerThreshold(BaseThreshold):

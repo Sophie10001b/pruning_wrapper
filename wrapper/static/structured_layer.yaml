@@ -6,3 +6,10 @@ residual_mapping: false
 layer:
   estimated_sparsity: -1
   pruning_type: M
+
+attention:
+  estimated_sparsity: -1
+  pruning_type: base
+  backend: tilelang
+  threshold: -1
+  enable_autotune: false

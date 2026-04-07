@@ -1,6 +1,13 @@
 cache_type: base
 
 attention:
+  estimated_sparsity: -1
+  pruning_type: base
+  backend: tilelang
+  threshold: -1
+  enable_autotune: false
+
+self_attn:
   estimated_sparsity: 0.5
   
   q_proj:
@@ -27,7 +34,7 @@ attention:
     block_size: 4
     backend: torch
 
-ffn:
+mlp:
   estimated_sparsity: 0.5
 
   up_proj:
