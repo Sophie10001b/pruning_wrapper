@@ -579,8 +579,7 @@ class QuerySparsePrefill:
         grid = lambda meta: (triton.cdiv(LQ, meta['BLOCK_M']), HQ, B)
 
         config = get_autotune_config(
-            params=['BLOCK_M', 'BLOCK_N', 'num_stages'],
-            BLOCK_M=BLOCK_M,
+            params=['BLOCK_N', 'num_stages'],
             BLOCK_N=BLOCK_N,
             num_stages=num_stages,
             **kwargs,
@@ -596,6 +595,7 @@ class QuerySparsePrefill:
             q, k, v,
             m_sort, m_sort_indices, pad_offset, out,
             B, LQ, LK, HQ, HK, D, G, D**-0.5,
+            BLOCK_M=BLOCK_M,
             IS_OFFLINE=kwargs.get('is_offline', False),
         )
         return out

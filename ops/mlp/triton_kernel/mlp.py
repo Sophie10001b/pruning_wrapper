@@ -425,8 +425,7 @@ class BMSparseMLP:
             out = torch.zeros((M, N), dtype=x.dtype, device=x.device)
             grid = lambda meta: (triton.cdiv(M, meta['BLOCK_M']), triton.cdiv(N, meta['BLOCK_N']), meta['SPLIT_K'])
             config = get_autotune_config(
-                params=['BLOCK_M', 'BLOCK_N', 'BLOCK_K', 'SPLIT_K', 'GROUP_SIZE', 'num_stages'],
-                BLOCK_M=BLOCK_M,
+                params=['BLOCK_N', 'BLOCK_K', 'SPLIT_K', 'GROUP_SIZE', 'num_stages'],
                 BLOCK_N=BLOCK_N,
                 BLOCK_K=BLOCK_K,
                 SPLIT_K=SPLIT_K,
@@ -444,6 +443,7 @@ class BMSparseMLP:
                 x_flat, m_sort, m_sort_indices,
                 w, b, out,
                 M, N, K,
+                BLOCK_M=BLOCK_M,
                 HAS_BIAS=b is not None,
                 ACTIVATION=kwargs.get('activation', 'identity'),
                 IS_OFFLINE=kwargs.get('is_offline', False),
