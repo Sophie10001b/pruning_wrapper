@@ -254,7 +254,6 @@ class TorchCuSPARSELtLinear(torch.nn.Module):
             return plan_state
 
         input_shape = list(x.shape)
-        input_shape[0] = max(8, input_shape[0])
         plan_state = search_for_alg_id(self.weight, tuple(input_shape))
         if len(self._plan_cache) >= self._cache_num:
             self._evict_oldest_plan()
@@ -265,12 +264,14 @@ class TorchCuSPARSELtLinear(torch.nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         M_size = x.shape[:2] if x.dim() > 2 else -1
         A = x.flatten(0, 1) if x.dim() > 2 else x
-        plan_state = self._get_plan_state(A)
-        
+
         B = self.weight.data
+        A_padded = B._pad_dense_input(A)
+        plan_state = self._get_plan_state(A_padded)
+        
+        # sm80 will failed when split-k > 1
         assert isinstance(B, torch.sparse.SparseSemiStructuredTensor)
         row, col = A.shape
-        A_padded = B._pad_dense_input(A)
         res = torch._cslt_sparse_mm(
             B.packed,
             A_padded.t(),

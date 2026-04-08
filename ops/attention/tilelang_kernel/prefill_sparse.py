@@ -252,7 +252,7 @@ class SparseAttentionTilelangPrefill:
         q_block = rearrange(q, 'b (nk k) h d -> b h nk k d', k=BLOCK_M).contiguous().mean(-2) # [b h lq // BLOCK_M, d]
         q_block = rearrange(q_block, 'b (h g) k d -> b h g k d', g=G).mean(2)
         k_block = rearrange(k, 'b (nk k) h d -> b h nk k d', k=BLOCK_N).contiguous().mean(-2) # [b h lk // BLOCK_N, d]
-        qk_score = q_block.permute(0, 2, 1, 3) @ (k_block.permute(0, 2, 3, 1)) # [B, HK, LQ', LK']
+        qk_score = q_block @ (k_block.transpose(-1, -2)) # [B, HK, LQ', LK']
         qk_score = torch.softmax(qk_score * D**-0.5, dim=-1)
 
         out = torch.empty_like(q)
